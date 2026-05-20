@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PrivacyLevel {
+  PUBLIC
+  NORMAL
+  PRIVATE
+  OFF
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  DISCONNECTED
+  ERROR
+  DISABLED
+  PENDING
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum AlertStatus {
+  PENDING
+  SENT
+  SKIPPED
+  FAILED
+}
+
+enum BackfillStatus {
+  BACKFILL
+  NEW
+}
+
+model User {
+  id                  String             @id @default(cuid())
+  telegramUserId      String?            @unique
+  displayName         String
+  snaptradeUserId     String?            @unique
+  encryptedUserSecret String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  memberships         GroupMember[]
+  brokerConnections   BrokerConnection[]
+  tradeEvents         TradeEvent[]
+  syncStates          SyncState[]
+}
+
+model Group {
+  id             String        @id @default(cuid())
+  telegramChatId String        @unique
+  name           String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  members        GroupMember[]
+  tradeEvents    TradeEvent[]
+}
+
+model GroupMember {
+  id            String       @id @default(cuid())
+  userId        String
+  groupId       String
+  privacyLevel  PrivacyLevel @default(NORMAL)
+  alertsEnabled Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group         Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, groupId])
+  @@index([groupId])
+}
+
+model BrokerConnection {
+  id              String           @id @default(cuid())
+  userId          String
+  provider        String           @default("snaptrade")
+  authorizationId String           @unique
+  brokerageName   String?
+  brokerageSlug   String?
+  connectionType  String?          @default("read")
+  status          ConnectionStatus @default(ACTIVE)
+  disabledReason  String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  disconnectedAt  DateTime?
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accounts        BrokerAccount[]
+
+  @@index([userId])
+}
+
+model BrokerAccount {
+  id                String           @id @default(cuid())
+  connectionId      String
+  providerAccountId String
+  accountNameHash   String?
+  accountType       String?
+  status            ConnectionStatus @default(ACTIVE)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  connection        BrokerConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  tradeEvents       TradeEvent[]
+
+  @@unique([connectionId, providerAccountId])
+  @@index([providerAccountId])
+}
+
+model SyncState {
+  id        String   @id @default(cuid())
+  userId    String
+  accountId String?
+  key       String
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, accountId, key])
+}
+
+model TradeEvent {
+  id             String         @id @default(cuid())
+  userId         String
+  groupId        String?
+  accountId      String?
+  symbol         String
+  side           TradeSide
+  quantity       Decimal?
+  price          Decimal?
+  currency       String?        @default("USD")
+  tradeTime      DateTime
+  rawType        String?
+  rawStatus      String?
+  rawId          String?
+  dedupeHash     String         @unique
+  backfillStatus BackfillStatus @default(NEW)
+  alertStatus    AlertStatus    @default(PENDING)
+  createdAt      DateTime       @default(now())
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group          Group?         @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  account        BrokerAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  alerts         Alert[]
+
+  @@index([userId, tradeTime])
+  @@index([alertStatus])
+}
+
+model Alert {
+  id           String     @id @default(cuid())
+  tradeEventId String
+  groupId      String
+  platform     String     @default("telegram")
+  messageId    String?
+  renderedText String
+  sentAt       DateTime?
+  createdAt    DateTime   @default(now())
+  tradeEvent   TradeEvent @relation(fields: [tradeEventId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model IdempotencyKey {
+  key       String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
