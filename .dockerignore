@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+apps/*/node_modules
+apps/*/dist
+coverage
+.turbo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
