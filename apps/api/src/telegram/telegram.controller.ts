@@ -1,10 +1,11 @@
 import { Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
-import { BrokerSyncService } from '../broker/broker-sync.service';
 import { PrivacyService } from '../privacy/privacy.service';
 
 @Controller('telegram')
@@ -13,9 +14,9 @@ export class TelegramController {
     private prisma: PrismaService,
     private telegram: TelegramService,
     private onboarding: BrokerOnboardingService,
-    private sync: BrokerSyncService,
     private privacy: PrivacyService,
     private config: ConfigService,
+    @InjectQueue('trade-sync') private queue: Queue,
   ) {}
 
   @Post('webhook')
@@ -48,8 +49,8 @@ export class TelegramController {
         const summary = connections.length ? connections.map(c => `${c.status}: ${c.brokerageName ?? c.brokerageSlug ?? 'Brokerage'} (${c.connectionType ?? 'read'})`).join('\n') : 'No brokerage connected yet. Use /connect.';
         await this.telegram.sendMessage(chatId, summary);
       } else if (this.cmd(text, '/sync')) {
-        const result = await this.sync.syncUser(user.id);
-        await this.telegram.sendMessage(chatId, `Sync complete. New events: ${result.created}. Alerts sent: ${result.alerted}.`);
+        await this.queue.add('sync-user', { userId: user.id }, { removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
+        await this.telegram.sendMessage(chatId, 'Sync queued. Alerts will appear in this group as new executions arrive.');
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
         await this.telegram.sendMessage(chatId, `Disconnected ${count} brokerage connection(s).`);

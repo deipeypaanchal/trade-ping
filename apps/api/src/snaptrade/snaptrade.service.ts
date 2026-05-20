@@ -1,87 +1,107 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Snaptrade } from 'snaptrade-typescript-sdk';
 import { SnapTradeAccount, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradeUser } from './snaptrade.types';
 
 @Injectable()
 export class SnaptradeService {
   private readonly logger = new Logger(SnaptradeService.name);
-  private readonly baseUrl = 'https://api.snaptrade.com/api/v1';
+  private client: Snaptrade | null = null;
+
   constructor(private readonly config: ConfigService) {}
 
-  private credentials() {
-    const clientId = this.config.getOrThrow<string>('SNAPTRADE_CLIENT_ID');
-    const consumerKey = this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY');
-    return { clientId, consumerKey };
+  private sdk(): Snaptrade {
+    if (this.client) return this.client;
+    this.client = new Snaptrade({
+      clientId: this.config.getOrThrow<string>('SNAPTRADE_CLIENT_ID'),
+      consumerKey: this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY'),
+    });
+    return this.client;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}, query: Record<string, string | number | boolean | undefined> = {}): Promise<T> {
-    if (this.config.get<boolean>('SNAPTRADE_USE_MOCK')) return this.mock<T>(path, init);
-    const { clientId, consumerKey } = this.credentials();
-    const url = new URL(`${this.baseUrl}${path}`);
-    for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
-    const res = await fetch(url, {
-      ...init,
-      headers: {
-        'content-type': 'application/json',
-        'SnapTrade-Client-Id': clientId,
-        'SnapTrade-Consumer-Key': consumerKey,
-        ...(init.headers ?? {}),
-      },
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`SnapTrade ${init.method ?? 'GET'} ${path} failed: ${res.status} ${text}`);
-    return (text ? JSON.parse(text) : {}) as T;
+  private get mock(): boolean {
+    return this.config.get<boolean>('SNAPTRADE_USE_MOCK') === true;
   }
 
   async registerUser(appUserId: string): Promise<SnapTradeUser> {
-    return this.request<SnapTradeUser>('/snapTrade/registerUser', { method: 'POST', body: JSON.stringify({ userId: appUserId }) });
+    if (this.mock) return { userId: `mock-${appUserId}`, userSecret: 'mock-secret' };
+    const res = await this.sdk().authentication.registerSnapTradeUser({ userId: appUserId });
+    const data = res.data as { userId?: string; userSecret?: string };
+    if (!data?.userId || !data?.userSecret) throw new Error('SnapTrade registerUser did not return userId/userSecret');
+    return { userId: data.userId, userSecret: data.userSecret };
   }
 
   async deleteUser(userId: string): Promise<void> {
-    await this.request(`/snapTrade/deleteUser`, { method: 'DELETE' }, { userId });
+    if (this.mock) return;
+    await this.sdk().authentication.deleteSnapTradeUser({ userId });
   }
 
   async connectionPortal(userId: string, userSecret: string, groupId: string): Promise<SnapTradePortal> {
-    const body: Record<string, unknown> = {
+    if (this.mock) {
+      return { redirectURI: `${this.config.getOrThrow<string>('APP_BASE_URL')}/snaptrade/callback?mock=true`, sessionId: 'mock-session' };
+    }
+    const broker = this.config.get<string>('SNAPTRADE_BROKER_SLUG') || undefined;
+    const customRedirect = `${this.config.getOrThrow<string>('SNAPTRADE_REDIRECT_URI')}?groupId=${encodeURIComponent(groupId)}`;
+    const res = await this.sdk().authentication.loginSnapTradeUser({
+      userId,
+      userSecret,
+      broker,
       connectionType: 'read',
       immediateRedirect: true,
-      customRedirect: `${this.config.getOrThrow<string>('SNAPTRADE_REDIRECT_URI')}?groupId=${encodeURIComponent(groupId)}`,
+      customRedirect,
       showCloseButton: true,
       connectionPortalVersion: 'v4',
-    };
-    const broker = this.config.get<string>('SNAPTRADE_BROKER_SLUG');
-    if (broker) body.broker = broker;
-    return this.request<SnapTradePortal>('/snapTrade/login', { method: 'POST', body: JSON.stringify(body) }, { userId, userSecret });
+    });
+    const data = res.data as { redirectURI?: string; sessionId?: string };
+    if (!data?.redirectURI) throw new Error('SnapTrade login did not return redirectURI');
+    return { redirectURI: data.redirectURI, sessionId: data.sessionId };
   }
 
   async listConnections(userId: string, userSecret: string): Promise<SnapTradeConnection[]> {
-    return this.request<SnapTradeConnection[]>('/authorizations', {}, { userId, userSecret });
+    if (this.mock) {
+      return [{ id: 'mock-auth', type: 'read', disabled: false, brokerage: { slug: 'ROBINHOOD', display_name: 'Robinhood' } }];
+    }
+    const res = await this.sdk().connections.listBrokerageAuthorizations({ userId, userSecret });
+    return (res.data as SnapTradeConnection[]) ?? [];
   }
 
   async deleteConnection(userId: string, userSecret: string, authorizationId: string): Promise<void> {
-    await this.request(`/authorizations/${authorizationId}`, { method: 'DELETE' }, { userId, userSecret });
+    if (this.mock) return;
+    // removeBrokerageAuthorization is synchronous (204). Use it so disconnect is immediate.
+    await this.sdk().connections.removeBrokerageAuthorization({ authorizationId, userId, userSecret });
   }
 
   async listAccounts(userId: string, userSecret: string, authorizationId?: string): Promise<SnapTradeAccount[]> {
-    if (authorizationId) {
-      return this.request<SnapTradeAccount[]>(`/authorizations/${authorizationId}/accounts`, {}, { userId, userSecret });
+    if (this.mock) {
+      return [{ id: 'mock-account', name: 'Mock Robinhood', brokerage_authorization: 'mock-auth' }];
     }
-    return this.request<SnapTradeAccount[]>('/accounts', {}, { userId, userSecret });
+    if (authorizationId) {
+      const res = await this.sdk().connections.listBrokerageAuthorizationAccounts({ authorizationId, userId, userSecret });
+      return (res.data as SnapTradeAccount[]) ?? [];
+    }
+    const res = await this.sdk().accountInformation.listUserAccounts({ userId, userSecret });
+    return (res.data as SnapTradeAccount[]) ?? [];
   }
 
   async listAccountOrders(userId: string, userSecret: string, accountId: string, days: number): Promise<SnapTradeOrder[]> {
-    return this.request<SnapTradeOrder[]>(`/accounts/${accountId}/orders`, {}, { userId, userSecret, days, state: 'all' });
+    if (this.mock) {
+      return [{ brokerage_order_id: 'mock-order-1', status: 'EXECUTED', action: 'BUY', universal_symbol: { symbol: 'AAPL' }, filled_quantity: 1, average_fill_price: 100, filled_date: new Date().toISOString() }];
+    }
+    const res = await this.sdk().accountInformation.getUserAccountOrders({ userId, userSecret, accountId, state: 'all', days });
+    return (res.data as SnapTradeOrder[]) ?? [];
   }
 
-  private async mock<T>(path: string, init: RequestInit): Promise<T> {
-    this.logger.warn(`SNAPTRADE_USE_MOCK=true: ${init.method ?? 'GET'} ${path}`);
-    if (path.includes('registerUser')) return { userId: `mock-${Date.now()}`, userSecret: 'mock-secret' } as T;
-    if (path.includes('login')) return { redirectURI: `${process.env.APP_BASE_URL}/snaptrade/callback?mock=true`, sessionId: 'mock-session' } as T;
-    if (path === '/authorizations') return [{ id: 'mock-auth', type: 'read', disabled: false, brokerage: { slug: 'ROBINHOOD', display_name: 'Robinhood' } }] as T;
-    if (path.includes('/accounts')) {
-      if (path.endsWith('/orders')) return [{ brokerage_order_id: 'mock-order-1', status: 'EXECUTED', action: 'BUY', universal_symbol: { symbol: 'AAPL' }, filled_quantity: 1, average_fill_price: 100, filled_date: new Date().toISOString() }] as T;
-      return [{ id: 'mock-account', name: 'Mock Robinhood', brokerage_authorization: 'mock-auth' }] as T;
+  /**
+   * Trigger a manual holdings refresh for one connection. Useful after CONNECTION_ADDED
+   * or on demand. SnapTrade fires ACCOUNT_HOLDINGS_UPDATED when complete.
+   */
+  async refreshConnection(userId: string, userSecret: string, authorizationId: string): Promise<void> {
+    if (this.mock) return;
+    try {
+      await this.sdk().connections.refreshBrokerageAuthorization({ authorizationId, userId, userSecret });
+    } catch (err) {
+      // Refresh is disabled on real-time plans and rate-limited on others; log and continue.
+      this.logger.warn(`refreshBrokerageAuthorization failed for ${authorizationId}: ${(err as Error).message}`);
     }
-    return {} as T;
   }
 }

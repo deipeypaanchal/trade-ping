@@ -9,7 +9,8 @@
 - [x] Build passes
 - [x] Tests pass
 - [x] Lint passes
-- [ ] Docker image build verified
+- [x] CI runs `db:generate` before lint/test/build
+- [ ] Docker image build verified on host (run: `docker build -t tradeping .`)
 
 ## Credentials
 
@@ -53,8 +54,8 @@
 
 ## Legal / Product
 
-- [ ] Terms of service
-- [ ] Privacy policy
-- [ ] Not-financial-advice disclaimer
-- [ ] No copy-trading UI
-- [ ] No public leaderboard in v1
+- [x] Terms of service draft (`docs/TERMS.md` — requires counsel review)
+- [x] Privacy policy draft (`docs/PRIVACY.md` — requires counsel review)
+- [x] Not-financial-advice disclaimer (`docs/DISCLAIMER.md`, embedded in every alert)
+- [x] No copy-trading UI
+- [x] No public leaderboard in v1

@@ -18,6 +18,7 @@ jobs:
           node-version: 20
       - run: corepack enable
       - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm db:generate
       - run: corepack pnpm lint
       - run: corepack pnpm test
       - run: corepack pnpm build

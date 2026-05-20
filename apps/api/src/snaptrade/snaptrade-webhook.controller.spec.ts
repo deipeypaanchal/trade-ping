@@ -11,7 +11,8 @@ describe('SnaptradeWebhookController', () => {
   const config = new ConfigService({ SNAPTRADE_CONSUMER_KEY: 'consumer-secret' });
   const prisma = {
     auditLog: { create: jest.fn() },
-    user: { findFirst: jest.fn() },
+    user: { findUnique: jest.fn(), delete: jest.fn() },
+    brokerConnection: { updateMany: jest.fn() },
   } as unknown as PrismaService;
   const queue = { add: jest.fn() } as unknown as Queue;
   const controller = new SnaptradeWebhookController(crypto, config, prisma, queue);
@@ -21,18 +22,18 @@ describe('SnaptradeWebhookController', () => {
   });
 
   it('verifies signatures against the raw request body', async () => {
-    const rawBody = `{"userId":"snap-user","eventTimestamp":"${new Date().toISOString()}","eventType":"ORDER"}`;
+    const rawBody = `{"userId":"snap-user","eventTimestamp":"${new Date().toISOString()}","eventType":"ACCOUNT_HOLDINGS_UPDATED"}`;
     const body = JSON.parse(rawBody);
     const signature = crypto.hmacBase64('consumer-secret', rawBody);
-    jest.spyOn(prisma.user, 'findFirst').mockResolvedValue({ id: 'app-user' } as never);
+    jest.spyOn(prisma.user, 'findUnique').mockResolvedValue({ id: 'app-user' } as never);
 
     await expect(controller.webhook(body, signature, { rawBody } as Request & { rawBody?: string })).resolves.toEqual({ ok: true });
 
-    expect(queue.add).toHaveBeenCalledWith('sync-user', { userId: 'app-user' }, expect.any(Object));
+    expect(queue.add).toHaveBeenCalledWith('sync-user', { userId: 'app-user' }, expect.objectContaining({ jobId: 'sync-user:app-user' }));
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {
         action: 'snaptrade_webhook_received',
-        metadata: { eventType: 'ORDER', eventTimestamp: body.eventTimestamp, userId: 'snap-user' },
+        metadata: { eventType: 'ACCOUNT_HOLDINGS_UPDATED', eventTimestamp: body.eventTimestamp, userId: 'snap-user' },
       },
     });
   });
