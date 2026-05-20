@@ -2,6 +2,7 @@
   "name": "tradeping-bot",
   "version": "0.2.0",
   "private": true,
+  "license": "MIT",
   "workspaces": ["apps/*"],
   "scripts": {
     "dev": "corepack pnpm --filter @tradeping/api dev",

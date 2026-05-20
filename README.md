@@ -78,3 +78,7 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
 - Confirm Robinhood order payload shape in your SnapTrade account.
 - Legal review of ToS/privacy/disclaimer.
 - Final security review before public rollout.
+
+## License
+
+MIT
