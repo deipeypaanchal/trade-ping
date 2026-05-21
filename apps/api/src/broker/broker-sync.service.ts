@@ -77,7 +77,11 @@ export class BrokerSyncService {
             update: { accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
             create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
           });
-          const orders = await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'));
+          const orders = [
+            ...(await this.snap.listRecentAccountOrders(user.snaptradeUserId, userSecret, acct.id)),
+            ...(await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'))),
+          ];
+          const seenOrderHashes = new Set<string>();
           // First sync for an account establishes a baseline: every order returned is
           // pre-existing history, so suppress it all rather than flooding the group.
           // After the baseline, only genuinely stale orders (older than the suppress
@@ -87,6 +91,8 @@ export class BrokerSyncService {
           for (const order of orders) {
             const norm = this.detector.normalizeOrder(userId, acct.id, order);
             if (!norm) continue;
+            if (seenOrderHashes.has(norm.dedupeHash)) continue;
+            seenOrderHashes.add(norm.dedupeHash);
             const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
             for (const member of user.memberships) {
               const trade = await this.prisma.tradeEvent.upsert({

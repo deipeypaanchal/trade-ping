@@ -48,6 +48,10 @@ export type SnapTradeOrder = {
   time_updated?: string;
 };
 
+export type SnapTradeRecentOrders = {
+  orders?: SnapTradeOrder[];
+};
+
 export type SnapTradePosition = {
   symbol?: {
     id?: string;
