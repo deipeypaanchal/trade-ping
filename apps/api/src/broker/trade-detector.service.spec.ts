@@ -31,6 +31,17 @@ describe('TradeDetectorService', () => {
     expect(out).toEqual({ symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' });
   });
 
+  it('normalizes unified SnapTrade position shapes', () => {
+    const out = svc.normalizePosition({
+      instrument: { id: 'sym-aapl', symbol: 'AAPL', currency: 'USD', kind: 'stock' },
+      units: '1.25',
+      price: '301.10',
+      cost_basis: '299.95',
+    });
+
+    expect(out).toEqual({ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1.25, price: 299.95, currency: 'USD' });
+  });
+
   it('combines whole and fractional position units when SnapTrade separates them', () => {
     const out = svc.normalizePosition({
       symbol: { symbol: { id: 'sym-aapl', symbol: 'AAPL' } },

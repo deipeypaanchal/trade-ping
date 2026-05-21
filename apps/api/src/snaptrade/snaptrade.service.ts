@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Snaptrade } from 'snaptrade-typescript-sdk';
-import { SnapTradeAccount, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradePosition, SnapTradeRecentOrders, SnapTradeUser } from './snaptrade.types';
+import { SnapTradeAccount, SnapTradeAllPositions, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradePosition, SnapTradeRecentOrders, SnapTradeUser } from './snaptrade.types';
 
 @Injectable()
 export class SnaptradeService {
@@ -124,8 +124,21 @@ export class SnaptradeService {
     if (this.mock) {
       return [{ symbol: { id: 'mock-aapl', symbol: 'AAPL' }, units: 1, price: 100, average_purchase_price: 100, currency: 'USD' }];
     }
+    const allPositions = await this.listUnifiedAccountPositions(userId, userSecret, accountId);
+    if (allPositions.length) return allPositions;
     const res = await this.sdk().accountInformation.getUserAccountPositions({ userId, userSecret, accountId });
     return Array.isArray(res?.data) ? (res.data as SnapTradePosition[]) : [];
+  }
+
+  private async listUnifiedAccountPositions(userId: string, userSecret: string, accountId: string): Promise<SnapTradePosition[]> {
+    try {
+      const res = await this.sdk().accountInformation.getAllAccountPositions({ userId, userSecret, accountId });
+      const data = res?.data as SnapTradeAllPositions | undefined;
+      return Array.isArray(data?.results) ? data.results : [];
+    } catch (err) {
+      this.logger.warn(`getAllAccountPositions failed for account ${accountId}: ${(err as Error).message}; falling back to legacy positions`);
+      return [];
+    }
   }
 
   /**

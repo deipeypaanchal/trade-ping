@@ -61,8 +61,8 @@ export class TradeDetectorService {
     if (!symbol) return null;
     const quantity = this.positionQuantity(position);
     if (quantity === undefined || quantity < 0) return null;
-    const price = this.toNumber(position.average_purchase_price ?? position.price);
-    const currency = typeof position.currency === 'string' ? position.currency : position.currency?.code ?? position.symbol?.currency?.code;
+    const price = this.toNumber(position.average_purchase_price ?? position.cost_basis ?? position.price);
+    const currency = typeof position.currency === 'string' ? position.currency : position.currency?.code ?? this.positionInstrumentCurrency(position) ?? position.symbol?.currency?.code;
     return {
       symbol: symbol.symbol.toUpperCase(),
       symbolId: symbol.id,
@@ -103,6 +103,8 @@ export class TradeDetectorService {
   }
 
   private extractPositionSymbol(position: SnapTradePosition): { symbol: string; id?: string } | null {
+    if (position.instrument?.symbol) return { symbol: position.instrument.symbol, id: position.instrument.id };
+    if (position.instrument?.raw_symbol) return { symbol: position.instrument.raw_symbol, id: position.instrument.id };
     const nested = position.symbol?.symbol;
     if (typeof nested === 'string' && nested) return { symbol: nested, id: position.symbol?.id };
     if (nested && typeof nested === 'object') {
@@ -113,6 +115,11 @@ export class TradeDetectorService {
     if (position.universal_symbol?.symbol) return { symbol: position.universal_symbol.symbol, id: position.universal_symbol.id };
     if (position.universal_symbol?.raw_symbol) return { symbol: position.universal_symbol.raw_symbol, id: position.universal_symbol.id };
     return null;
+  }
+
+  private positionInstrumentCurrency(position: SnapTradePosition): string | undefined {
+    const currency = position.instrument?.currency;
+    return typeof currency === 'string' ? currency : currency?.code;
   }
 
   private positionQuantity(position: SnapTradePosition): number | undefined {

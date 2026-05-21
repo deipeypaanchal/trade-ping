@@ -53,6 +53,14 @@ export type SnapTradeRecentOrders = {
 };
 
 export type SnapTradePosition = {
+  instrument?: {
+    id?: string;
+    symbol?: string;
+    raw_symbol?: string;
+    description?: string;
+    currency?: string | { code?: string };
+    kind?: string;
+  } | null;
   symbol?: {
     id?: string;
     symbol?: string | { id?: string; symbol?: string; raw_symbol?: string; description?: string };
@@ -65,6 +73,11 @@ export type SnapTradePosition = {
   quantity?: number | string;
   fractional_units?: number | string;
   price?: number | string;
+  cost_basis?: number | string;
   average_purchase_price?: number | string;
   currency?: string | { code?: string };
+};
+
+export type SnapTradeAllPositions = {
+  results?: SnapTradePosition[];
 };
