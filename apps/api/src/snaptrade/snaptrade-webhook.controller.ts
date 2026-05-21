@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Header, Headers, Post, Query, Req, UnauthorizedException } from '@nestjs/common';
 import { Request } from 'express';
+import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -48,6 +49,7 @@ export class SnaptradeWebhookController {
   @Post('webhook')
   async webhook(@Body() body: SnapWebhook, @Headers('signature') signature: string | undefined, @Req() req: Request & { rawBody?: string }) {
     const canonical = req.rawBody ?? stableStringify(body);
+    const eventJobKey = createHash('sha256').update(canonical).digest('hex').slice(0, 16);
     const expected = this.crypto.hmacBase64(this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY'), canonical);
     if (!this.crypto.safeEqual(signature, expected)) throw new UnauthorizedException('Invalid SnapTrade signature');
     const age = body.eventTimestamp ? Date.now() - new Date(body.eventTimestamp).getTime() : NaN;
@@ -81,14 +83,14 @@ export class SnaptradeWebhookController {
 
     if (body.eventType && SYNC_TRIGGER_EVENTS.has(body.eventType)) {
       if (localUser) {
-        // jobId dedupes concurrent enqueues for the same user (BullMQ ignores duplicate jobIds).
+        // jobId dedupes exact webhook redeliveries while allowing future events for the same user.
         await this.queue.add(
           'sync-user',
           { userId: localUser.id },
-          { jobId: `sync-user:${localUser.id}`, removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+          { jobId: `sync-user:${localUser.id}:${eventJobKey}`, removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
         );
       } else if (!snapUserId) {
-        await this.queue.add('sync-all', {}, { jobId: 'sync-all', removeOnComplete: 100, attempts: 3 });
+        await this.queue.add('sync-all', {}, { jobId: `sync-all:${eventJobKey}`, removeOnComplete: 100, attempts: 3 });
       }
     }
     return { ok: true };

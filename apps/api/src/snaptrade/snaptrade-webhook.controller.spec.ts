@@ -29,7 +29,11 @@ describe('SnaptradeWebhookController', () => {
 
     await expect(controller.webhook(body, signature, { rawBody } as Request & { rawBody?: string })).resolves.toEqual({ ok: true });
 
-    expect(queue.add).toHaveBeenCalledWith('sync-user', { userId: 'app-user' }, expect.objectContaining({ jobId: 'sync-user:app-user' }));
+    expect(queue.add).toHaveBeenCalledWith(
+      'sync-user',
+      { userId: 'app-user' },
+      expect.objectContaining({ jobId: expect.stringMatching(/^sync-user:app-user:[a-f0-9]{16}$/) }),
+    );
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {
         action: 'snaptrade_webhook_received',
