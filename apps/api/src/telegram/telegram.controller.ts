@@ -70,9 +70,11 @@ export class TelegramController {
         await this.telegram.sendMessage(chatId, this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
       } else if (this.cmd(text, '/status')) {
         await this.onboarding.refreshConnections(user.id);
-        const connections = await this.prisma.brokerConnection.findMany({ where: { userId: user.id }, orderBy: { updatedAt: 'desc' } });
-        const summary = connections.length ? connections.map(c => `${c.status}: ${c.brokerageName ?? c.brokerageSlug ?? 'Brokerage'} (${c.connectionType ?? 'read'})`).join('\n') : 'No brokerage connected yet. Run /connect to get started.';
-        await this.telegram.sendMessage(chatId, summary);
+        const connections = await this.prisma.brokerConnection.findMany({
+          where: { userId: user.id, status: { not: 'DISCONNECTED' } },
+          orderBy: { updatedAt: 'desc' },
+        });
+        await this.telegram.sendMessage(chatId, this.statusText(connections));
       } else if (this.cmd(text, '/sync')) {
         await this.queue.add('sync-user', { userId: user.id }, { removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
         await this.telegram.sendMessage(chatId, 'Sync queued — new executions will alert here shortly.');
@@ -138,6 +140,21 @@ export class TelegramController {
       '/status — your connection status',
       '/disconnect — remove your connections',
     ].join('\n');
+  }
+
+  private statusText(connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null }>) {
+    if (!connections.length) return 'No brokerage connected. Run /connect to get started.';
+    const label: Record<string, string> = {
+      ACTIVE: 'connected (read-only)',
+      PENDING: 'finishing connection…',
+      ERROR: 'needs reconnect — run /connect',
+      DISABLED: 'disabled by your broker — run /connect',
+    };
+    const lines = connections.map((c) => {
+      const name = this.escape(c.brokerageName ?? c.brokerageSlug ?? 'Brokerage');
+      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}`;
+    });
+    return ['Your connections:', ...lines].join('\n');
   }
 
   private privacyHelpText() {
