@@ -27,7 +27,7 @@ export class TradeDetectorService {
     if (!symbol) return null;
     const quantity = this.toNumber(order.filled_quantity ?? order.total_quantity ?? order.quantity);
     const price = this.toNumber(order.average_fill_price ?? order.execution_price ?? order.price);
-    const timestamp = order.filled_date ?? order.execution_time ?? order.trade_date ?? order.updated_date ?? order.created_date ?? new Date().toISOString();
+    const timestamp = order.time_executed ?? order.filled_date ?? order.execution_time ?? order.time_placed ?? order.trade_date ?? order.updated_date ?? order.time_updated ?? order.created_date ?? new Date().toISOString();
     const providerOrderId = order.brokerage_order_id ?? order.id;
     const rawId = providerOrderId ?? `${symbol}-${side}-${timestamp}-${quantity ?? ''}-${price ?? ''}`;
     const rawType = String(order.order_type ?? order.type ?? 'order');

@@ -43,4 +43,7 @@ export type SnapTradeOrder = {
   filled_date?: string;
   execution_time?: string;
   trade_date?: string;
+  time_executed?: string;
+  time_placed?: string;
+  time_updated?: string;
 };

@@ -13,6 +13,10 @@ describe('TradeDetectorService', () => {
     const out = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'CANCELED', action: 'BUY', universal_symbol: { symbol: 'AAPL' } });
     expect(out).toBeNull();
   });
+  it('uses time_placed when filled_date is absent (Robinhood shape)', () => {
+    const out = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'SELL', universal_symbol: { symbol: 'TTWO' }, filled_quantity: 5, time_placed: '2026-05-18T17:22:58Z' });
+    expect(out?.tradeTime.toISOString()).toBe('2026-05-18T17:22:58.000Z');
+  });
   it('dedupes provider order ids even when provider timestamps move', () => {
     const first = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'SELL', universal_symbol: { symbol: 'TTWO' }, filled_quantity: 1, filled_date: '2026-01-01T10:00:00Z' });
     const second = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'SELL', universal_symbol: { symbol: 'TTWO' }, filled_quantity: 1, filled_date: '2026-01-01T10:03:00Z' });
