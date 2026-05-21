@@ -95,7 +95,6 @@ export class TelegramService implements OnModuleInit {
       { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
       { command: 'trust', description: 'What is bot, user, and group level' },
       { command: 'setup', description: 'Post group onboarding instructions' },
-      { command: 'timezone', description: 'Set your alert timezone (IANA)' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'sync', description: 'Manual backup sync' },
       { command: 'disconnect', description: 'Remove your brokerage connections' },

@@ -74,7 +74,6 @@ describe('TelegramService', () => {
       'privacy',
       'trust',
       'setup',
-      'timezone',
       'status',
       'sync',
       'disconnect',

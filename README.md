@@ -50,7 +50,6 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 - `/privacy public|normal|private|off` — controls trade-alert detail level.
 - `/trust` — explains bot-level, user-level, group-level, and per-group privacy.
 - `/setup` — reposts group onboarding instructions.
-- `/timezone` — sets the user’s alert timezone.
 - `/status` — refreshes and displays brokerage connection status.
 - `/sync` — manually syncs the caller.
 - `/disconnect` — revokes brokerage connections.
@@ -68,7 +67,7 @@ When a broker does not expose an order but positions changed, TradePing can infe
 ## Trust model
 
 - **Bot level:** shared infrastructure and credentials: Telegram bot, SnapTrade API, Railway, Postgres, Redis, workers, and alert logic.
-- **User level:** a member’s Telegram identity, encrypted SnapTrade user secret, connected broker/accounts, detected trades/positions, and timezone.
+- **User level:** a member’s Telegram identity, encrypted SnapTrade user secret, connected broker/accounts, and detected trades/positions.
 - **Group level:** the Telegram group that receives alerts and the connected members in that group.
 - **Per-user per-group level:** `/privacy` controls only one member’s alerts in one group. A member can be public in one group, private in another, and off elsewhere.
 

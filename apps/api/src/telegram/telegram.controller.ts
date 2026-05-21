@@ -79,16 +79,6 @@ export class TelegramController {
       } else if (this.cmd(text, '/sync')) {
         await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued. This is just a manual check; TradePing already watches automatically in the background.');
-      } else if (this.cmd(text, '/timezone')) {
-        const tz = text.split(/\s+/)[1];
-        if (!tz) {
-          await this.telegram.sendMessage(chatId, `Your alert timezone is <b>${this.escape(user.timeZone || 'UTC')}</b>.\nChange it with /timezone <IANA-zone>, e.g. /timezone Europe/London`);
-        } else if (!this.isValidTimezone(tz)) {
-          await this.telegram.sendMessage(chatId, `Unknown timezone: ${this.escape(tz)}. Use an IANA zone like America/New_York or Europe/London.`);
-        } else {
-          await this.prisma.user.update({ where: { id: user.id }, data: { timeZone: tz } });
-          await this.telegram.sendMessage(chatId, `Alert timezone set to <b>${this.escape(tz)}</b>.`);
-        }
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
         await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
@@ -179,7 +169,6 @@ export class TelegramController {
       '/privacy — public, normal, private, or off',
       '/trust — what data is bot, user, and group level',
       '/setup — post the group onboarding guide again',
-      '/timezone — set IANA timezone (e.g. Europe/London)',
       '/status — your connection status',
       '/disconnect — remove your connections',
       '',
@@ -237,7 +226,7 @@ export class TelegramController {
       'Shared infrastructure: Telegram bot, SnapTrade API, Railway, database, Redis, and background sync.',
       '',
       '<b>User level</b>',
-      'Your Telegram identity, read-only SnapTrade connection, broker accounts, detected trades/positions, and timezone. /disconnect revokes your brokerage connections.',
+      'Your Telegram identity, read-only SnapTrade connection, broker accounts, and detected trades/positions. /disconnect revokes your brokerage connections.',
       '',
       '<b>Group level</b>',
       'The Telegram group destination and which connected members can post alerts here.',
@@ -257,16 +246,6 @@ export class TelegramController {
 
   private displayName(from: NonNullable<TelegramUpdate['message']>['from']) {
     return from?.username ? `@${from.username}` : [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Telegram User';
-  }
-
-  /** Validate IANA timezone strings via Intl. Returns false for unknown zones. */
-  private isValidTimezone(tz: string): boolean {
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: tz });
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private escape(v: string): string {

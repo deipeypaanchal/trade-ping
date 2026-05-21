@@ -7,7 +7,7 @@ Last updated: 2026-05-21
 TradePing should explain ownership in the product, not only in docs.
 
 - Bot level: shared infrastructure and credentials: Telegram bot, SnapTrade API, Railway, Postgres, Redis, workers, and alert logic.
-- User level: a member's Telegram identity, encrypted SnapTrade user secret, connected broker/accounts, detected trades/positions, and timezone.
+- User level: a member's Telegram identity, encrypted SnapTrade user secret, connected broker/accounts, and detected trades/positions.
 - Group level: the Telegram group destination and the connected members in that group.
 - Per-user per-group level: `/privacy` controls one member's alerts in one group. A member can be public in one group, private in another, and off elsewhere.
 
@@ -60,7 +60,6 @@ Recommended launch thresholds:
 
 - `/trust`: shipped. Explains bot/user/group boundaries.
 - `/setup`: shipped. Reposts group onboarding.
-- `/timezone`: shipped. Lets users control alert times.
 - Admin-only `/groupstatus`: show connected member count and group alert health without exposing broker details.
 - Public status page or uptime monitor: prove reliability outside Telegram.
 - Staging Railway environment: test migrations and Telegram/SnapTrade webhook changes before production.
