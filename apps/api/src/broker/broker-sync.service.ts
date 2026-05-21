@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../config/prisma.service';
 import { CryptoService } from '../security/crypto.service';
+import { EncryptedSecretError } from '../security/errors';
 import { SnaptradeService } from '../snaptrade/snaptrade.service';
 import { TradeDetectorService } from './trade-detector.service';
 import { AlertService } from '../alerts/alert.service';
@@ -28,68 +29,103 @@ export class BrokerSyncService {
       },
     });
     if (!user.snaptradeUserId || !user.encryptedUserSecret) return { created: 0, alerted: 0 };
-    const userSecret = this.crypto.decrypt(user.encryptedUserSecret);
-    const connections = await this.snap.listConnections(user.snaptradeUserId, userSecret);
-    let created = 0, alerted = 0;
-    for (const conn of connections) {
-      const dbConn = await this.prisma.brokerConnection.upsert({
-        where: { authorizationId: conn.id },
-        update: { brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
-        create: { userId, authorizationId: conn.id, brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
-      });
-      if (conn.disabled) continue;
-      const accounts = await this.snap.listAccounts(user.snaptradeUserId, userSecret, conn.id);
-      for (const acct of accounts) {
-        const acctNameHash = acct.name ? this.crypto.hash(acct.name) : undefined;
-        const dbAcct = await this.prisma.brokerAccount.upsert({
-          where: { connectionId_providerAccountId: { connectionId: dbConn.id, providerAccountId: acct.id } },
-          update: { accountNameHash: acctNameHash, status: 'ACTIVE' },
-          create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, status: 'ACTIVE' },
+
+    // Decrypt up front. If the encryption key rotated or the payload is corrupted,
+    // mark the user's connections as disconnected so they're prompted to /connect
+    // again instead of cycling through worker retries forever.
+    let userSecret: string;
+    try {
+      userSecret = this.crypto.decrypt(user.encryptedUserSecret);
+    } catch (err) {
+      if (err instanceof EncryptedSecretError) {
+        this.logger.error(`decrypt failed for user ${userId}: ${err.message}; marking connections DISCONNECTED`);
+        await this.prisma.brokerConnection.updateMany({
+          where: { userId, status: { not: 'DISCONNECTED' } },
+          data: { status: 'DISCONNECTED', disabledReason: 'Encryption key mismatch — please /connect again', disconnectedAt: new Date() },
         });
-        const orders = await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'));
-        // First sync for an account establishes a baseline: every order returned is
-        // pre-existing history, so suppress it all rather than flooding the group.
-        // After the baseline, only genuinely stale orders (older than the suppress
-        // window, e.g. a broker surfacing a backdated fill) are suppressed.
-        const isFirstSync = !(await this.hasSyncState(userId, dbAcct.id));
-        const staleCutoff = Date.now() - this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS') * 3600_000;
-        for (const order of orders) {
-          const norm = this.detector.normalizeOrder(userId, acct.id, order);
-          if (!norm) continue;
-          const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
-          for (const member of user.memberships) {
-            const trade = await this.prisma.tradeEvent.upsert({
-              where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
-              update: {},
-              create: {
-                userId,
-                groupId: member.groupId,
-                accountId: dbAcct.id,
-                symbol: norm.symbol,
-                side: norm.side,
-                quantity: norm.quantity,
-                price: norm.price,
-                currency: norm.currency,
-                tradeTime: norm.tradeTime,
-                rawType: norm.rawType,
-                rawStatus: norm.rawStatus,
-                rawId: norm.rawId,
-                dedupeHash: `${norm.dedupeHash}:${member.groupId}`,
-                backfillStatus: suppress ? 'BACKFILL' : 'NEW',
-                alertStatus: suppress ? 'SKIPPED' : 'PENDING',
-              },
-            });
-            if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
-            if (!suppress && trade.alertStatus === 'PENDING') {
-              try {
-                if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
-              } catch (e) {
-                this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+        await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'decrypt_failed' } } });
+        return { created: 0, alerted: 0 };
+      }
+      throw err;
+    }
+
+    let created = 0, alerted = 0;
+    let connections;
+    try {
+      connections = await this.snap.listConnections(user.snaptradeUserId, userSecret);
+    } catch (err) {
+      this.logger.warn(`syncUser(${userId}) listConnections failed: ${(err as Error).message}; skipping this run`);
+      await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'list_connections_failed', message: (err as Error).message } } });
+      return { created, alerted };
+    }
+
+    for (const conn of connections) {
+      try {
+        const dbConn = await this.prisma.brokerConnection.upsert({
+          where: { authorizationId: conn.id },
+          update: { brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
+          create: { userId, authorizationId: conn.id, brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
+        });
+        if (conn.disabled) continue;
+        const accounts = await this.snap.listAccounts(user.snaptradeUserId, userSecret, conn.id);
+        for (const acct of accounts) {
+          const acctNameHash = acct.name ? this.crypto.hash(acct.name) : undefined;
+          const dbAcct = await this.prisma.brokerAccount.upsert({
+            where: { connectionId_providerAccountId: { connectionId: dbConn.id, providerAccountId: acct.id } },
+            update: { accountNameHash: acctNameHash, status: 'ACTIVE' },
+            create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, status: 'ACTIVE' },
+          });
+          const orders = await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'));
+          // First sync for an account establishes a baseline: every order returned is
+          // pre-existing history, so suppress it all rather than flooding the group.
+          // After the baseline, only genuinely stale orders (older than the suppress
+          // window, e.g. a broker surfacing a backdated fill) are suppressed.
+          const isFirstSync = !(await this.hasSyncState(userId, dbAcct.id));
+          const staleCutoff = Date.now() - this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS') * 3600_000;
+          for (const order of orders) {
+            const norm = this.detector.normalizeOrder(userId, acct.id, order);
+            if (!norm) continue;
+            const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
+            for (const member of user.memberships) {
+              const trade = await this.prisma.tradeEvent.upsert({
+                where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
+                update: {},
+                create: {
+                  userId,
+                  groupId: member.groupId,
+                  accountId: dbAcct.id,
+                  symbol: norm.symbol,
+                  side: norm.side,
+                  quantity: norm.quantity,
+                  price: norm.price,
+                  currency: norm.currency,
+                  tradeTime: norm.tradeTime,
+                  rawType: norm.rawType,
+                  rawStatus: norm.rawStatus,
+                  rawId: norm.rawId,
+                  dedupeHash: `${norm.dedupeHash}:${member.groupId}`,
+                  backfillStatus: suppress ? 'BACKFILL' : 'NEW',
+                  alertStatus: suppress ? 'SKIPPED' : 'PENDING',
+                },
+              });
+              if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
+              if (!suppress && trade.alertStatus === 'PENDING') {
+                try {
+                  if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+                } catch (e) {
+                  this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+                }
               }
             }
           }
+          await this.markSynced(userId, dbAcct.id);
         }
-        await this.markSynced(userId, dbAcct.id);
+      } catch (err) {
+        // Per-connection isolation: a single failing brokerage must not abort the
+        // whole user's sync. Other connections (and a future retry of this one)
+        // can still make progress.
+        this.logger.warn(`syncUser(${userId}) connection ${conn.id} failed: ${(err as Error).message}`);
+        await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_connection_failed', metadata: { authorizationId: conn.id, message: (err as Error).message } } });
       }
     }
     await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_completed', metadata: { created, alerted } } });

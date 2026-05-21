@@ -55,7 +55,7 @@ importers:
         specifier: ^7.8.1
         version: 7.8.2
       snaptrade-typescript-sdk:
-        specifier: ^9.0.200
+        specifier: 9.0.200
         version: 9.0.200
       zod:
         specifier: ^3.24.1

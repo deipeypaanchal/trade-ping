@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import { BrokerSyncService } from '../broker/broker-sync.service';
+import { JOB_DEFAULTS } from '../config/constants';
 
 @Controller('jobs')
 export class SchedulerController {
@@ -11,14 +12,14 @@ export class SchedulerController {
   @Post('sync-all')
   async syncAll(@Headers('authorization') auth?: string) {
     this.requireInternal(auth);
-    await this.queue.add('sync-all', {}, { removeOnComplete: 100, removeOnFail: 500, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
+    await this.queue.add('sync-all', {}, { ...JOB_DEFAULTS });
     return { ok: true };
   }
 
   @Post('sync-user')
   async syncUser(@Body() body: { userId: string }, @Headers('authorization') auth?: string) {
     this.requireInternal(auth);
-    await this.queue.add('sync-user', { userId: body.userId }, { removeOnComplete: 100, removeOnFail: 500, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
+    await this.queue.add('sync-user', { userId: body.userId }, { ...JOB_DEFAULTS });
     return { ok: true };
   }
 

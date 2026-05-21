@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AlertStatus, PrivacyLevel } from '@prisma/client';
+import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../config/prisma.service';
+import { TIME } from '../config/constants';
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 
 @Injectable()
@@ -51,16 +53,39 @@ export class AlertService {
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(event.symbol)}`];
     if (level === 'PUBLIC') {
-      const details = [event.quantity ? `${event.quantity.toString()} shares` : null, event.price ? `@ $${Number(event.price).toFixed(2)}` : null].filter(Boolean).join(' ');
+      const details = [
+        event.quantity ? `${this.formatDecimal(event.quantity)} shares` : null,
+        event.price ? `@ $${this.formatDecimal(event.price, 2)}` : null,
+      ].filter(Boolean).join(' ');
       if (details) lines.push(details);
     }
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
-    lines.push(`Time: ${new Date(event.tradeTime).toLocaleString('en-US', { timeZone: 'America/New_York' })}`);
+    const tz = event.user?.timeZone || TIME.DEFAULT_TIMEZONE;
+    lines.push(`Time: ${new Date(event.tradeTime).toLocaleString('en-US', { timeZone: tz })}`);
     lines.push('Read-only social alert. Not financial advice.');
     return lines.join('\n');
   }
 
+  /** Decimal-safe formatter. Avoid Number() coercion that would lose precision on large values. */
+  private formatDecimal(value: unknown, fractionDigits?: number): string {
+    if (value instanceof Decimal) return fractionDigits === undefined ? value.toString() : value.toFixed(fractionDigits);
+    if (typeof value === 'string' || typeof value === 'number') {
+      try {
+        const d = new Decimal(value);
+        return fractionDigits === undefined ? d.toString() : d.toFixed(fractionDigits);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  }
+
   private escape(v: string): string {
-    return v.replace(/[&<>]/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[s]!));
+    return v
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }

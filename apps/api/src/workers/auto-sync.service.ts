@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { JOB_DEFAULTS } from '../config/constants';
 
 @Injectable()
 export class AutoSyncService implements OnModuleInit, OnModuleDestroy {
@@ -28,16 +29,6 @@ export class AutoSyncService implements OnModuleInit, OnModuleDestroy {
   private async enqueue() {
     const minutes = this.config.getOrThrow<number>('SYNC_INTERVAL_MINUTES');
     const windowId = Math.floor(Date.now() / (minutes * 60_000));
-    await this.queue.add(
-      'sync-all',
-      {},
-      {
-        jobId: `auto-sync-all-${windowId}`,
-        removeOnComplete: 100,
-        removeOnFail: 500,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-      },
-    );
+    await this.queue.add('sync-all', {}, { jobId: `auto-sync-all-${windowId}`, ...JOB_DEFAULTS });
   }
 }

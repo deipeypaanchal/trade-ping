@@ -7,6 +7,7 @@ import { Queue } from 'bullmq';
 import { CryptoService } from '../security/crypto.service';
 import { PrismaService } from '../config/prisma.service';
 import { stableStringify } from '../security/stable-json';
+import { JOB_DEFAULTS, WEBHOOK } from '../config/constants';
 
 type SnapWebhook = {
   eventTimestamp?: string;
@@ -53,7 +54,18 @@ export class SnaptradeWebhookController {
     const expected = this.crypto.hmacBase64(this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY'), canonical);
     if (!this.crypto.safeEqual(signature, expected)) throw new UnauthorizedException('Invalid SnapTrade signature');
     const age = body.eventTimestamp ? Date.now() - new Date(body.eventTimestamp).getTime() : NaN;
-    if (!Number.isFinite(age) || age > 5 * 60_000) throw new UnauthorizedException('Stale SnapTrade webhook');
+    if (!Number.isFinite(age) || age > WEBHOOK.REPLAY_WINDOW_MS) throw new UnauthorizedException('Stale SnapTrade webhook');
+
+    // Replay protection: persist the canonical hash; reject duplicates. Postgres
+    // unique-violation on the second insert is treated as "already processed".
+    const nonce = `snaptrade:${createHash('sha256').update(canonical).digest('hex')}`;
+    const expiresAt = new Date(Date.now() + WEBHOOK.IDEMPOTENCY_TTL_MS);
+    try {
+      await this.prisma.idempotencyKey.create({ data: { key: nonce, expiresAt } });
+    } catch {
+      // Already seen — silently ack so SnapTrade stops retrying.
+      return { ok: true, replay: true };
+    }
 
     await this.prisma.auditLog.create({ data: { action: 'snaptrade_webhook_received', metadata: { eventType: body.eventType, eventTimestamp: body.eventTimestamp, userId: body.userId } } });
 
@@ -87,10 +99,10 @@ export class SnaptradeWebhookController {
         await this.queue.add(
           'sync-user',
           { userId: localUser.id },
-          { jobId: `sync-user:${localUser.id}:${eventJobKey}`, removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+          { jobId: `sync-user:${localUser.id}:${eventJobKey}`, ...JOB_DEFAULTS },
         );
       } else if (!snapUserId) {
-        await this.queue.add('sync-all', {}, { jobId: `sync-all:${eventJobKey}`, removeOnComplete: 100, attempts: 3 });
+        await this.queue.add('sync-all', {}, { jobId: `sync-all:${eventJobKey}`, ...JOB_DEFAULTS });
       }
     }
     return { ok: true };

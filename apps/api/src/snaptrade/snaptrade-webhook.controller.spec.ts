@@ -13,12 +13,14 @@ describe('SnaptradeWebhookController', () => {
     auditLog: { create: jest.fn() },
     user: { findUnique: jest.fn(), delete: jest.fn() },
     brokerConnection: { updateMany: jest.fn() },
+    idempotencyKey: { create: jest.fn() },
   } as unknown as PrismaService;
   const queue = { add: jest.fn() } as unknown as Queue;
   const controller = new SnaptradeWebhookController(crypto, config, prisma, queue);
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.idempotencyKey.create as jest.Mock).mockResolvedValue({ key: 'x' });
   });
 
   it('verifies signatures against the raw request body', async () => {
@@ -47,5 +49,16 @@ describe('SnaptradeWebhookController', () => {
     const signature = crypto.hmacBase64('consumer-secret', rawBody);
 
     await expect(controller.webhook(JSON.parse(rawBody), signature, { rawBody } as Request & { rawBody?: string })).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('treats a duplicate signature as a replay and short-circuits', async () => {
+    const rawBody = `{"userId":"snap-user","eventTimestamp":"${new Date().toISOString()}","eventType":"ACCOUNT_HOLDINGS_UPDATED"}`;
+    const body = JSON.parse(rawBody);
+    const signature = crypto.hmacBase64('consumer-secret', rawBody);
+    (prisma.idempotencyKey.create as jest.Mock).mockRejectedValueOnce(new Error('unique violation'));
+
+    await expect(controller.webhook(body, signature, { rawBody } as Request & { rawBody?: string })).resolves.toEqual({ ok: true, replay: true });
+    expect(queue.add).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 });

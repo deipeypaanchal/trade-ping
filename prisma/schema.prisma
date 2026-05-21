@@ -43,6 +43,8 @@ model User {
   id                  String             @id @default(cuid())
   telegramUserId      String?            @unique
   displayName         String
+  /// IANA timezone (e.g. "America/New_York"). Falls back to UTC in alerts when null.
+  timeZone            String?
   snaptradeUserId     String?            @unique
   encryptedUserSecret String?
   createdAt           DateTime           @default(now())
@@ -175,10 +177,13 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@index([userId, createdAt])
+  @@index([action, createdAt])
 }
 
 model IdempotencyKey {
   key       String   @id
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  @@index([expiresAt])
 }

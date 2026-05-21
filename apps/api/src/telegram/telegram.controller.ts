@@ -1,8 +1,9 @@
-import { Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Headers, Post, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
+import { JOB_DEFAULTS } from '../config/constants';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
@@ -76,8 +77,18 @@ export class TelegramController {
         });
         await this.telegram.sendMessage(chatId, this.statusText(connections));
       } else if (this.cmd(text, '/sync')) {
-        await this.queue.add('sync-user', { userId: user.id }, { removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
+        await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued — new executions will alert here shortly.');
+      } else if (this.cmd(text, '/timezone')) {
+        const tz = text.split(/\s+/)[1];
+        if (!tz) {
+          await this.telegram.sendMessage(chatId, `Your alert timezone is <b>${this.escape(user.timeZone || 'UTC')}</b>.\nChange it with /timezone <IANA-zone>, e.g. /timezone Europe/London`);
+        } else if (!this.isValidTimezone(tz)) {
+          await this.telegram.sendMessage(chatId, `Unknown timezone: ${this.escape(tz)}. Use an IANA zone like America/New_York or Europe/London.`);
+        } else {
+          await this.prisma.user.update({ where: { id: user.id }, data: { timeZone: tz } });
+          await this.telegram.sendMessage(chatId, `Alert timezone set to <b>${this.escape(tz)}</b>.`);
+        }
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
         await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
@@ -85,8 +96,19 @@ export class TelegramController {
         await this.telegram.sendMessage(chatId, this.helpText(msg.chat.type), { replyMarkup: msg.chat.type === 'private' ? undefined : this.privateStartKeyboard() });
       }
     } catch (e) {
-      await this.prisma.auditLog.create({ data: { userId: user.id, action: 'telegram_command_failed', metadata: { message: (e as Error).message } } });
-      await this.telegram.sendMessage(chatId, 'Something went wrong. Please try again or contact the group admin.');
+      const command = text.split(/\s+/)[0] || 'unknown';
+      const err = e as Error;
+      await this.prisma.auditLog.create({
+        data: {
+          userId: user.id,
+          action: 'telegram_command_failed',
+          metadata: { command, message: err.message, name: err.name },
+        },
+      });
+      const userMsg = e instanceof BadRequestException
+        ? `Invalid input: ${err.message}`
+        : 'Something went wrong. Please try again or contact the group admin.';
+      await this.telegram.sendMessage(chatId, userMsg);
     }
     return { ok: true };
   }
@@ -137,6 +159,7 @@ export class TelegramController {
       '',
       '/connect — connect a read-only brokerage',
       '/privacy — public, normal, private, or off',
+      '/timezone — set IANA timezone (e.g. Europe/London)',
       '/status — your connection status',
       '/disconnect — remove your connections',
     ].join('\n');
@@ -160,10 +183,10 @@ export class TelegramController {
   private privacyHelpText() {
     return [
       'Set how your trades appear in this group:',
-      '/privacy public — name, symbol, quantity and price',
-      '/privacy normal — name and symbol only (default)',
+      '/privacy public  — name, symbol, quantity and price',
+      '/privacy normal  — name and symbol only (default)',
       '/privacy private — anonymous, symbol only',
-      '/privacy off — no alerts',
+      '/privacy off     — no alerts',
     ].join('\n');
   }
 
@@ -190,7 +213,22 @@ export class TelegramController {
     return from?.username ? `@${from.username}` : [from?.first_name, from?.last_name].filter(Boolean).join(' ') || 'Telegram User';
   }
 
+  /** Validate IANA timezone strings via Intl. Returns false for unknown zones. */
+  private isValidTimezone(tz: string): boolean {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: tz });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private escape(v: string): string {
-    return v.replace(/[&<>]/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[s]!));
+    return v
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }

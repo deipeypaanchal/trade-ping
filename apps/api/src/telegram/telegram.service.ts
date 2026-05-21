@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Bottleneck from 'bottleneck';
+import { LIMITS } from '../config/constants';
 
 export type TelegramReplyMarkup = {
   inline_keyboard: Array<Array<{ text: string; url: string }>>;
@@ -22,25 +23,25 @@ export class TelegramApiError extends Error {
  *   - Global: ~30 messages / second for bulk notifications.
  *
  * Strategy:
- *   - Per-chat limiter: minTime=1100ms and reservoir=20/min protects chat and group limits.
+ *   - Per-chat limiter: minTime + reservoir/min protects chat and group limits.
  *   - Chained global limiter: 25 msgs/sec, leaving headroom under the 30/sec ceiling.
- *   - On HTTP 429, honor `retry_after` from the response body and retry once.
+ *   - On HTTP 429, honor `retry_after` from the response body and retry up to LIMITS.TELEGRAM_MAX_RETRIES.
  */
 @Injectable()
 export class TelegramService implements OnModuleInit {
   private readonly logger = new Logger(TelegramService.name);
   private readonly globalLimiter = new Bottleneck({
-    reservoir: 25,
-    reservoirRefreshAmount: 25,
-    reservoirRefreshInterval: 1000,
-    maxConcurrent: 5,
+    reservoir: LIMITS.TELEGRAM_GLOBAL_RESERVOIR,
+    reservoirRefreshAmount: LIMITS.TELEGRAM_GLOBAL_RESERVOIR,
+    reservoirRefreshInterval: LIMITS.TELEGRAM_GLOBAL_RESERVOIR_REFRESH_MS,
+    maxConcurrent: LIMITS.TELEGRAM_GLOBAL_MAX_CONCURRENT,
   });
   private readonly perChat = new Bottleneck.Group({
-    minTime: 1100,
+    minTime: LIMITS.TELEGRAM_PER_CHAT_MIN_TIME_MS,
     maxConcurrent: 1,
-    reservoir: 20,
-    reservoirRefreshAmount: 20,
-    reservoirRefreshInterval: 60_000,
+    reservoir: LIMITS.TELEGRAM_PER_CHAT_RESERVOIR,
+    reservoirRefreshAmount: LIMITS.TELEGRAM_PER_CHAT_RESERVOIR,
+    reservoirRefreshInterval: LIMITS.TELEGRAM_PER_CHAT_RESERVOIR_REFRESH_MS,
   });
 
   constructor(private config: ConfigService) {
@@ -92,6 +93,7 @@ export class TelegramService implements OnModuleInit {
     const commands = [
       { command: 'connect', description: 'Connect a read-only brokerage' },
       { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
+      { command: 'timezone', description: 'Set your alert timezone (IANA)' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'disconnect', description: 'Remove your brokerage connections' },
       { command: 'help', description: 'How TradePing works' },
@@ -116,11 +118,11 @@ export class TelegramService implements OnModuleInit {
       }),
     });
     const body = await res.text();
-    if (res.status === 429 && attempt < 2) {
+    if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
       let retryAfterSec = 1;
       try { retryAfterSec = (JSON.parse(body)?.parameters?.retry_after as number) || 1; } catch { /* ignore */ }
       this.logger.warn(`Telegram 429 for chat ${chatId}; retrying in ${retryAfterSec}s`);
-      await new Promise((r) => setTimeout(r, (retryAfterSec + 0.2) * 1000));
+      await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
       return this.doSend(chatId, text, options, attempt + 1);
     }
     if (!res.ok) throw new TelegramApiError(`Telegram sendMessage failed: ${res.status} ${body}`, res.status);
