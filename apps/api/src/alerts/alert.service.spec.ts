@@ -1,4 +1,3 @@
-import { ConfigService } from '@nestjs/config';
 import { Decimal } from '@prisma/client/runtime/library';
 import { AlertService } from './alert.service';
 import { PrismaService } from '../config/prisma.service';

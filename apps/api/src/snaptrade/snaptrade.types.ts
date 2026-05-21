@@ -47,3 +47,20 @@ export type SnapTradeOrder = {
   time_placed?: string;
   time_updated?: string;
 };
+
+export type SnapTradePosition = {
+  symbol?: {
+    id?: string;
+    symbol?: string | { id?: string; symbol?: string; raw_symbol?: string; description?: string };
+    raw_symbol?: string;
+    description?: string;
+    currency?: { code?: string };
+  } | null;
+  universal_symbol?: { id?: string; symbol?: string; raw_symbol?: string } | null;
+  units?: number | string;
+  quantity?: number | string;
+  fractional_units?: number | string;
+  price?: number | string;
+  average_purchase_price?: number | string;
+  currency?: string | { code?: string };
+};

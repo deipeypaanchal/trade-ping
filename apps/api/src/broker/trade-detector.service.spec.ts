@@ -22,4 +22,22 @@ describe('TradeDetectorService', () => {
     const second = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'SELL', universal_symbol: { symbol: 'TTWO' }, filled_quantity: 1, filled_date: '2026-01-01T10:03:00Z' });
     expect(second?.dedupeHash).toBe(first?.dedupeHash);
   });
+  it('normalizes nested position symbols from SnapTrade positions', () => {
+    const out = svc.normalizePosition({
+      symbol: { symbol: { id: 'sym-coin', symbol: 'COIN' } },
+      units: 5,
+      average_purchase_price: '231.368',
+    });
+    expect(out).toEqual({ symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' });
+  });
+  it('turns position increases into stable buy deltas', () => {
+    const previous = { symbol: 'COIN', symbolId: 'sym-coin', quantity: 1, price: 200, currency: 'USD' };
+    const current = { symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' };
+    const first = svc.normalizePositionDelta('u1', 'a1', previous, current, new Date('2026-05-21T08:20:00Z'));
+    const second = svc.normalizePositionDelta('u1', 'a1', previous, current, new Date('2026-05-21T08:21:00Z'));
+    expect(first?.side).toBe('BUY');
+    expect(first?.quantity).toBe(4);
+    expect(first?.symbol).toBe('COIN');
+    expect(second?.dedupeHash).toBe(first?.dedupeHash);
+  });
 });

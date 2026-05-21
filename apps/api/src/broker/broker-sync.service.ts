@@ -3,8 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../config/prisma.service';
 import { CryptoService } from '../security/crypto.service';
 import { EncryptedSecretError } from '../security/errors';
+import { SnapTradePosition } from '../snaptrade/snaptrade.types';
 import { SnaptradeService } from '../snaptrade/snaptrade.service';
-import { TradeDetectorService } from './trade-detector.service';
+import { PositionSnapshotEntry, TradeDetectorService } from './trade-detector.service';
 import { AlertService } from '../alerts/alert.service';
 
 @Injectable()
@@ -118,6 +119,15 @@ export class BrokerSyncService {
               }
             }
           }
+          try {
+            const positions = await this.snap.listAccountPositions(user.snaptradeUserId, userSecret, acct.id);
+            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true);
+            created += positionCounts.created;
+            alerted += positionCounts.alerted;
+          } catch (err) {
+            this.logger.warn(`syncUser(${userId}) account ${acct.id} positions failed: ${(err as Error).message}`);
+            await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_positions_failed', metadata: { accountId: acct.id, message: (err as Error).message } } });
+          }
           await this.markSynced(userId, dbAcct.id);
         }
       } catch (err) {
@@ -149,6 +159,97 @@ export class BrokerSyncService {
   private async hasSyncState(userId: string, accountId: string): Promise<boolean> {
     const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
     return state !== null;
+  }
+
+  private async syncPositionDeltas(
+    userId: string,
+    dbAccountId: string,
+    providerAccountId: string,
+    memberships: { groupId: string }[],
+    positions: SnapTradePosition[],
+    suppressBackfill: boolean,
+  ): Promise<{ created: number; alerted: number }> {
+    const current = positions
+      .map((position) => this.detector.normalizePosition(position))
+      .filter((position): position is PositionSnapshotEntry => position !== null);
+    const currentByKey = this.positionMap(current);
+    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId: dbAccountId, key: 'position_snapshot' } } });
+    const previous = this.readPositionSnapshot(state?.value);
+    const previousByKey = this.positionMap(previous);
+
+    let created = 0, alerted = 0;
+    const startedAt = Date.now();
+    if (state && !suppressBackfill) {
+      const keys = new Set([...previousByKey.keys(), ...currentByKey.keys()]);
+      for (const key of keys) {
+        const norm = this.detector.normalizePositionDelta(userId, providerAccountId, previousByKey.get(key), currentByKey.get(key));
+        if (!norm) continue;
+        for (const member of memberships) {
+          const trade = await this.prisma.tradeEvent.upsert({
+            where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
+            update: {},
+            create: {
+              userId,
+              groupId: member.groupId,
+              accountId: dbAccountId,
+              symbol: norm.symbol,
+              side: norm.side,
+              quantity: norm.quantity,
+              price: norm.price,
+              currency: norm.currency,
+              tradeTime: norm.tradeTime,
+              rawType: norm.rawType,
+              rawStatus: norm.rawStatus,
+              rawId: norm.rawId,
+              dedupeHash: `${norm.dedupeHash}:${member.groupId}`,
+              backfillStatus: 'NEW',
+              alertStatus: 'PENDING',
+            },
+          });
+          if (trade.createdAt.getTime() >= startedAt) created += 1;
+          if (trade.alertStatus === 'PENDING') {
+            try {
+              if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+            } catch (e) {
+              this.logger.warn(`alert send threw for position delta ${trade.id}: ${(e as Error).message}`);
+            }
+          }
+        }
+      }
+    }
+
+    await this.writePositionSnapshot(userId, dbAccountId, current);
+    return { created, alerted };
+  }
+
+  private positionMap(entries: PositionSnapshotEntry[]): Map<string, PositionSnapshotEntry> {
+    return new Map(entries.map((entry) => [entry.symbolId ?? entry.symbol, entry]));
+  }
+
+  private readPositionSnapshot(value: unknown): PositionSnapshotEntry[] {
+    if (!value || typeof value !== 'object') return [];
+    const rawPositions = Array.isArray(value) ? value : 'positions' in value && Array.isArray(value.positions) ? value.positions : [];
+    return rawPositions.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const symbol = 'symbol' in entry && typeof entry.symbol === 'string' ? entry.symbol : null;
+      const quantity = 'quantity' in entry && typeof entry.quantity === 'number' ? entry.quantity : null;
+      if (!symbol || quantity === null) return [];
+      return [{
+        symbol,
+        symbolId: 'symbolId' in entry && typeof entry.symbolId === 'string' ? entry.symbolId : undefined,
+        quantity,
+        price: 'price' in entry && typeof entry.price === 'number' ? entry.price : undefined,
+        currency: 'currency' in entry && typeof entry.currency === 'string' ? entry.currency : undefined,
+      }];
+    });
+  }
+
+  private async writePositionSnapshot(userId: string, accountId: string, positions: PositionSnapshotEntry[]) {
+    await this.prisma.syncState.upsert({
+      where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } },
+      update: { value: { at: new Date().toISOString(), positions } },
+      create: { userId, accountId, key: 'position_snapshot', value: { at: new Date().toISOString(), positions } },
+    });
   }
 
   private async markSynced(userId: string, accountId: string) {

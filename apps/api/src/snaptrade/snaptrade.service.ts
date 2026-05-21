@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Snaptrade } from 'snaptrade-typescript-sdk';
-import { SnapTradeAccount, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradeUser } from './snaptrade.types';
+import { SnapTradeAccount, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradePosition, SnapTradeUser } from './snaptrade.types';
 
 @Injectable()
 export class SnaptradeService {
@@ -110,6 +110,14 @@ export class SnaptradeService {
     }
     const res = await this.sdk().accountInformation.getUserAccountOrders({ userId, userSecret, accountId, state: 'all', days });
     return Array.isArray(res?.data) ? (res.data as SnapTradeOrder[]) : [];
+  }
+
+  async listAccountPositions(userId: string, userSecret: string, accountId: string): Promise<SnapTradePosition[]> {
+    if (this.mock) {
+      return [{ symbol: { id: 'mock-aapl', symbol: 'AAPL' }, units: 1, price: 100, average_purchase_price: 100, currency: 'USD' }];
+    }
+    const res = await this.sdk().accountInformation.getUserAccountPositions({ userId, userSecret, accountId });
+    return Array.isArray(res?.data) ? (res.data as SnapTradePosition[]) : [];
   }
 
   /**
