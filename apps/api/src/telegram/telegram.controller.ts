@@ -3,11 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
-import { JOB_DEFAULTS } from '../config/constants';
+import { JOB_DEFAULTS, TIME } from '../config/constants';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
 import { PrivacyService } from '../privacy/privacy.service';
+import { brokerFreshnessNote, brokerFreshnessSummary } from '../broker/broker-freshness';
 
 const VALID_PRIVACY = new Set(['PUBLIC', 'NORMAL', 'PRIVATE', 'OFF']);
 
@@ -73,18 +74,21 @@ export class TelegramController {
         await this.onboarding.refreshConnections(user.id);
         const connections = await this.prisma.brokerConnection.findMany({
           where: { userId: user.id, status: { not: 'DISCONNECTED' } },
-          include: { accounts: { where: { status: { not: 'DISCONNECTED' } }, select: { accountType: true } } },
+          include: { accounts: { where: { status: { not: 'DISCONNECTED' } }, select: { id: true, accountType: true } } },
           orderBy: { updatedAt: 'desc' },
         });
-        await this.telegram.sendMessage(chatId, this.statusText(connections));
+        const syncStates = connections.length ? await this.syncStatesFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, Date>();
+        await this.telegram.sendMessage(chatId, this.statusText(connections, syncStates));
       } else if (this.cmd(text, '/sync')) {
         await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
-        await this.telegram.sendMessage(chatId, 'Sync queued. This is just a manual check; TradePing already watches automatically in the background.');
+        await this.telegram.sendMessage(chatId, 'Sync queued. TradePing also checks automatically in the background. Alerts appear when your broker reports fresh data; Fidelity/IBKR may be delayed up to 24h.');
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
         await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
       } else if (this.cmd(text, '/trust')) {
         await this.telegram.sendMessage(chatId, this.trustText());
+      } else if (this.cmd(text, '/diagnostics')) {
+        await this.telegram.sendMessage(chatId, await this.diagnosticsText(user.id, group?.id));
       } else if (this.cmd(text, '/help') || this.cmd(text, '/start')) {
         await this.telegram.sendMessage(chatId, this.helpText(msg.chat.type), { replyMarkup: msg.chat.type === 'private' ? undefined : this.privateStartKeyboard() });
       }
@@ -131,6 +135,7 @@ export class TelegramController {
       url,
       '',
       'TradePing can read executed trades and positions for alerts. It cannot place trades, move money, or see your brokerage password.',
+      'Broker freshness depends on the broker. Fidelity/IBKR may be delayed up to 24h.',
       '',
       'The link expires in about 5 minutes. Run /disconnect anytime to revoke access.',
     ].join('\n');
@@ -169,15 +174,20 @@ export class TelegramController {
       '/connect — connect a read-only brokerage',
       '/privacy — public, normal, private, or off',
       '/trust — what data is bot, user, and group level',
+      '/diagnostics — explain what TradePing sees right now',
       '/setup — post the group onboarding guide again',
       '/status — your connection status',
       '/disconnect — remove your connections',
       '',
       'Normal setup: tap Start private setup once, then run /connect here. After that, alerts are automatic.',
+      'Broker freshness varies. Fidelity/IBKR may be delayed up to 24h.',
     ].join('\n');
   }
 
-  private statusText(connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null; accounts?: Array<{ accountType: string | null }> }>) {
+  private statusText(
+    connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null; accounts?: Array<{ id: string; accountType: string | null }> }>,
+    syncStates: Map<string, Date>,
+  ) {
     if (!connections.length) return 'No brokerage connected. Run /connect to get started.';
     const label: Record<string, string> = {
       ACTIVE: 'connected (read-only)',
@@ -192,9 +202,11 @@ export class TelegramController {
         return label ? [label] : [];
       }))];
       const suffix = accountTypes.length ? `; accounts: ${accountTypes.join(', ')}` : '';
-      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}${suffix}`;
+      const lastChecked = this.lastChecked(c.accounts ?? [], syncStates);
+      const checked = lastChecked ? `; last checked ${this.relativeTime(lastChecked)}` : '';
+      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}${suffix}${checked}\n${brokerFreshnessNote(c)}`;
     });
-    return ['Your connections:', ...lines].join('\n');
+    return ['Your connections:', ...lines].join('\n\n');
   }
 
   private accountTypeLabel(type: string | null): string | null {
@@ -203,6 +215,11 @@ export class TelegramController {
     const labels: Record<string, string> = {
       DIGITALASSET: 'Crypto',
       INDIVIDUAL: 'Individual',
+      NP: 'BrokerageLink',
+      BROKERAGELINK: 'BrokerageLink',
+      CASH: 'Cash',
+      MARGIN: 'Margin',
+      RETIREMENT: 'Retirement',
     };
     return labels[normalized] ?? this.escape(normalized.replace(/[_-]+/g, ' ').toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase()));
   }
@@ -229,6 +246,7 @@ export class TelegramController {
       '3. Set your group visibility with /privacy.',
       '',
       'Each member connects their own read-only brokerage. This group only receives alerts for members who connected here.',
+      'Alerts depend on broker freshness. Fidelity/IBKR may be delayed up to 24h.',
       '',
       'Run /trust to see what is bot-level, user-level, and group-level.',
     ].join('\n');
@@ -252,7 +270,82 @@ export class TelegramController {
       '',
       '<b>Safety</b>',
       'TradePing uses read-only access. It cannot place trades, transfer money, or see your brokerage password.',
+      '',
+      '<b>Freshness</b>',
+      'Alerts are best-effort near-real-time where the broker supports it. Fidelity/IBKR data may be delayed up to 24h.',
     ].join('\n');
+  }
+
+  private async diagnosticsText(userId: string, groupId?: string) {
+    const connections = await this.prisma.brokerConnection.findMany({
+      where: { userId, status: { not: 'DISCONNECTED' } },
+      include: { accounts: { where: { status: { not: 'DISCONNECTED' } }, select: { id: true, accountType: true } } },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const syncStates = connections.length ? await this.syncStatesFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, Date>();
+    const latest = await this.prisma.tradeEvent.findFirst({
+      where: { userId, ...(groupId ? { groupId } : {}) },
+      orderBy: { tradeTime: 'desc' },
+      select: { symbol: true, side: true, tradeTime: true, alertStatus: true, backfillStatus: true, account: { select: { connection: { select: { brokerageName: true, brokerageSlug: true } } } } },
+    });
+    const member = groupId ? await this.prisma.groupMember.findUnique({
+      where: { userId_groupId: { userId, groupId } },
+      select: { privacyLevel: true, alertsEnabled: true },
+    }) : null;
+
+    const lines = ['<b>TradePing diagnostics</b>'];
+    if (member) lines.push(`This group: privacy ${member.privacyLevel}; alerts ${member.alertsEnabled ? 'on' : 'off'}.`);
+    lines.push(`Connections: ${connections.length ? connections.length : 'none'}.`);
+    if (connections.length) lines.push(brokerFreshnessSummary(connections));
+    for (const conn of connections) {
+      const accountTypes = [...new Set(conn.accounts.flatMap((account) => {
+        const label = this.accountTypeLabel(account.accountType);
+        return label ? [label] : [];
+      }))];
+      const lastChecked = this.lastChecked(conn.accounts, syncStates);
+      lines.push(`${this.escape(conn.brokerageName ?? conn.brokerageSlug ?? 'Brokerage')}: ${conn.status.toLowerCase()}${accountTypes.length ? `; ${accountTypes.join(', ')}` : ''}${lastChecked ? `; checked ${this.relativeTime(lastChecked)}` : ''}.`);
+    }
+    if (latest) {
+      const broker = latest.account?.connection?.brokerageName ?? latest.account?.connection?.brokerageSlug ?? 'broker';
+      lines.push(`Latest detected here: ${latest.side} ${this.escape(latest.symbol)} via ${this.escape(broker)} at ${new Date(latest.tradeTime).toLocaleString('en-US', { timeZone: TIME.DEFAULT_TIMEZONE })}; ${latest.backfillStatus.toLowerCase()}, ${latest.alertStatus.toLowerCase()}.`);
+    } else {
+      lines.push('Latest detected here: none yet.');
+    }
+    lines.push('If a broker is delayed, /sync cannot force data SnapTrade has not received yet.');
+    return lines.join('\n');
+  }
+
+  private async syncStatesFor(accountIds: string[]): Promise<Map<string, Date>> {
+    if (!accountIds.length) return new Map();
+    const states = await this.prisma.syncState.findMany({
+      where: { accountId: { in: accountIds }, key: { in: ['position_snapshot', 'last_successful_order_sync'] } },
+      select: { accountId: true, updatedAt: true },
+    });
+    const byAccount = new Map<string, Date>();
+    for (const state of states) {
+      if (!state.accountId) continue;
+      const prev = byAccount.get(state.accountId);
+      if (!prev || state.updatedAt > prev) byAccount.set(state.accountId, state.updatedAt);
+    }
+    return byAccount;
+  }
+
+  private lastChecked(accounts: Array<{ id: string }>, syncStates: Map<string, Date>): Date | null {
+    return accounts.reduce<Date | null>((latest, account) => {
+      const checked = syncStates.get(account.id);
+      if (!checked) return latest;
+      return !latest || checked > latest ? checked : latest;
+    }, null);
+  }
+
+  private relativeTime(date: Date): string {
+    const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (seconds < 90) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 90) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
   }
 
   private privateStartKeyboard() {

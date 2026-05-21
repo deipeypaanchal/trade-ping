@@ -1,6 +1,6 @@
 # TradePing Bot
 
-Telegram group bot that posts near-real-time buy/sell alerts when members connect read-only brokerage accounts through SnapTrade.
+Telegram group bot that posts read-only buy/sell alerts when members connect brokerage accounts through SnapTrade. Alerts are best-effort near-real-time where broker data supports it; Fidelity/IBKR can be delayed up to 24 hours.
 
 ## Current status
 
@@ -12,7 +12,7 @@ Launch-candidate backend for credential-backed testing. Build, lint, unit tests,
 - PostgreSQL + Prisma
 - Redis + BullMQ
 - Telegram Bot API webhooks
-- SnapTrade Connection Portal + order sync
+- SnapTrade Connection Portal + recent orders, historical orders, and holdings/position sync
 - AES-256-GCM encryption for SnapTrade user secrets
 
 ## Local setup
@@ -49,9 +49,10 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 - `/connect` — creates a read-only SnapTrade Connection Portal link.
 - `/privacy public|normal|private|off` — controls trade-alert detail level.
 - `/trust` — explains bot-level, user-level, group-level, and per-group privacy.
+- `/diagnostics` — explains latest sync, broker freshness, and what TradePing sees.
 - `/setup` — reposts group onboarding instructions.
-- `/status` — refreshes and displays brokerage connection status.
-- `/sync` — manually syncs the caller.
+- `/status` — refreshes and displays brokerage connection status, account type, and freshness.
+- `/sync` — manually syncs the caller. This cannot force delayed broker data to appear.
 - `/disconnect` — revokes brokerage connections.
 - `/help` — command list.
 
@@ -63,6 +64,14 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 - `OFF`: no group alerts.
 
 When a broker does not expose an order but positions changed, TradePing can infer the side and quantity. Inferred alerts intentionally say the fill price is unavailable instead of showing a misleading dollar value.
+
+## Broker freshness
+
+TradePing checks automatically in the background and reacts to SnapTrade webhooks where available. Broker data freshness still depends on the brokerage:
+
+- Robinhood and many brokers can appear close to real time when SnapTrade receives fresh data.
+- Fidelity and IBKR data can be delayed up to 24 hours.
+- `/diagnostics` is the first support command when a user asks why an alert did not appear.
 
 ## Trust model
 

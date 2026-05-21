@@ -11,7 +11,9 @@ TradePing should explain ownership in the product, not only in docs.
 - Group level: the Telegram group destination and the connected members in that group.
 - Per-user per-group level: `/privacy` controls one member's alerts in one group. A member can be public in one group, private in another, and off elsewhere.
 
-The `/trust` command mirrors this model in Telegram.
+The `/trust` command mirrors this model in Telegram. The `/diagnostics`
+command gives a user-scoped support snapshot: group privacy, alert toggle,
+connected brokers, broker freshness, last sync check, and latest detected trade.
 
 ## Current production posture
 
@@ -21,7 +23,8 @@ The `/trust` command mirrors this model in Telegram.
 - Liveness: `/livez` is available for a cheap process-only check.
 - Jobs: BullMQ queue in Redis, worker concurrency 2, job limiter 30 jobs/minute.
 - Sync: automatic `sync-all` every `SYNC_INTERVAL_MINUTES`, currently intended to be 1 minute for beta.
-- Data source: SnapTrade orders first, position-delta fallback when orders are missing but holdings change. Inferred position alerts show quantity only and do not label position prices as execution fills.
+- Data source: SnapTrade recent orders, historical orders, then position-delta fallback when orders are missing but holdings change. Inferred position alerts show quantity only and do not label position prices as execution fills.
+- Broker freshness: best-effort near-real-time where the broker supports it. Fidelity and IBKR can be delayed up to 24h, so the bot must not promise realtime alerts for every broker.
 - Telegram: per-chat and global Bottleneck rate limits plus 429 retry handling.
 
 ## Railway capacity read
@@ -44,6 +47,7 @@ Recommended launch thresholds:
 
 - Railway service sleeping or restarts: keep health checks enabled and avoid relying on in-memory state.
 - SnapTrade API latency or plan limits: queue retries help, but rate-limit logs should be reviewed.
+- Broker-specific data delay: Fidelity/IBKR may not expose same-day activity to SnapTrade. `/sync` cannot force data SnapTrade has not received yet.
 - Telegram 429s: per-chat limiter protects groups, but bursts can delay alerts.
 - Database availability: `/healthz` catches this before deploys go active.
 - Schema drift: always run `pnpm db:deploy` after pulling migrations.
@@ -61,5 +65,6 @@ Recommended launch thresholds:
 - `/trust`: shipped. Explains bot/user/group boundaries.
 - `/setup`: shipped. Reposts group onboarding.
 - Admin-only `/groupstatus`: show connected member count and group alert health without exposing broker details.
+- Broker freshness badges by brokerage in onboarding, if SnapTrade exposes a stable machine-readable support matrix.
 - Public status page or uptime monitor: prove reliability outside Telegram.
 - Staging Railway environment: test migrations and Telegram/SnapTrade webhook changes before production.
