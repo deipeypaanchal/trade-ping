@@ -52,11 +52,8 @@ export class AlertService {
     const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(event.symbol)}`];
-    if (level === 'PUBLIC') {
-      const details = [
-        event.quantity ? `${this.formatDecimal(event.quantity)} shares` : null,
-        event.price ? `@ $${this.formatDecimal(event.price, 2)}` : null,
-      ].filter(Boolean).join(' ');
+    if (level !== 'PRIVATE') {
+      const details = this.tradeDetails(event);
       if (details) lines.push(details);
     }
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
@@ -66,18 +63,38 @@ export class AlertService {
     return lines.join('\n');
   }
 
+  private tradeDetails(event: any): string | null {
+    const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
+    const price = event.price ? this.formatDecimal(event.price, 2) : null;
+    const value = event.quantity && event.price ? this.formatCurrency(this.decimal(event.quantity).mul(this.decimal(event.price))) : null;
+    const details = [
+      quantity ? `Qty: ${quantity}` : null,
+      price ? `Avg price: $${price}` : null,
+      value ? `Value: ${value}` : null,
+    ].filter(Boolean);
+    return details.length ? details.join('\n') : null;
+  }
+
   /** Decimal-safe formatter. Avoid Number() coercion that would lose precision on large values. */
   private formatDecimal(value: unknown, fractionDigits?: number): string {
     if (value instanceof Decimal) return fractionDigits === undefined ? value.toString() : value.toFixed(fractionDigits);
     if (typeof value === 'string' || typeof value === 'number') {
       try {
-        const d = new Decimal(value);
+        const d = this.decimal(value);
         return fractionDigits === undefined ? d.toString() : d.toFixed(fractionDigits);
       } catch {
         return String(value);
       }
     }
     return String(value);
+  }
+
+  private formatCurrency(value: Decimal): string {
+    return `$${value.toFixed(2)}`;
+  }
+
+  private decimal(value: unknown): Decimal {
+    return value instanceof Decimal ? value : new Decimal(value as Decimal.Value);
   }
 
   private escape(v: string): string {

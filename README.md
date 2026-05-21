@@ -55,8 +55,8 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 
 ## Privacy levels
 
-- `PUBLIC`: display name + ticker + side + quantity + price + broker.
-- `NORMAL`: display name + ticker + side + broker.
+- `PUBLIC`: display name + ticker + side + quantity + price + value + broker.
+- `NORMAL`: display name + ticker + side + quantity + price + value + broker.
 - `PRIVATE`: anonymous + ticker + side only.
 - `OFF`: no group alerts.
 

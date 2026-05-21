@@ -183,8 +183,8 @@ export class TelegramController {
   private privacyHelpText() {
     return [
       'Set how your trades appear in this group:',
-      '/privacy public  — name, symbol, quantity and price',
-      '/privacy normal  — name and symbol only (default)',
+      '/privacy public  — name, symbol, quantity, price and value',
+      '/privacy normal  — name, symbol, quantity, price and value (default)',
       '/privacy private — anonymous, symbol only',
       '/privacy off     — no alerts',
     ].join('\n');

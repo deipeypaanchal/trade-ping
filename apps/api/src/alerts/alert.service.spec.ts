@@ -53,14 +53,40 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('A&lt;B&gt;&amp;&quot;C&#39;');
   });
 
-  it('formats Decimal price without precision loss', async () => {
+  it('formats quantity, price, and value without precision loss', async () => {
     const event = makeEvent({ price: new Decimal('123456789.987') });
     const { svc, prisma, sentTexts } = makeService();
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
+    expect(sentTexts[0]).toContain('Qty: 10');
     expect(sentTexts[0]).toContain('$123456789.99');
+    expect(sentTexts[0]).toContain('Value: $1234567899.87');
+  });
+
+  it('shows size details in normal privacy mode', async () => {
+    const event = makeEvent();
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Qty: 10');
+    expect(sentTexts[0]).toContain('Avg price: $150.25');
+    expect(sentTexts[0]).toContain('Value: $1502.50');
+  });
+
+  it('hides size details in private privacy mode', async () => {
+    const event = makeEvent();
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PRIVATE' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Anonymous member bought AAPL');
+    expect(sentTexts[0]).not.toContain('Qty:');
+    expect(sentTexts[0]).not.toContain('Value:');
   });
 
   it("uses the user's timezone when set", async () => {
