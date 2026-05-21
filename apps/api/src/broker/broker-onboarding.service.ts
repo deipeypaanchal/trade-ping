@@ -31,7 +31,7 @@ export class BrokerOnboardingService {
     const secret = this.crypto.decrypt(user.encryptedUserSecret);
     const conns = await this.snap.listConnections(user.snaptradeUserId, secret);
     for (const c of conns) {
-      await this.prisma.brokerConnection.upsert({
+      const connection = await this.prisma.brokerConnection.upsert({
         where: { authorizationId: c.id },
         update: {
           brokerageName: c.brokerage?.display_name ?? c.brokerage?.name,
@@ -49,6 +49,26 @@ export class BrokerOnboardingService {
           status: c.disabled ? 'DISABLED' : 'ACTIVE',
         },
       });
+      if (!c.disabled) {
+        const accounts = await this.snap.listAccounts(user.snaptradeUserId, secret, c.id);
+        for (const acct of accounts) {
+          await this.prisma.brokerAccount.upsert({
+            where: { connectionId_providerAccountId: { connectionId: connection.id, providerAccountId: acct.id } },
+            update: {
+              accountNameHash: acct.name ? this.crypto.hash(acct.name) : undefined,
+              accountType: this.accountTypeFrom(acct),
+              status: 'ACTIVE',
+            },
+            create: {
+              connectionId: connection.id,
+              providerAccountId: acct.id,
+              accountNameHash: acct.name ? this.crypto.hash(acct.name) : undefined,
+              accountType: this.accountTypeFrom(acct),
+              status: 'ACTIVE',
+            },
+          });
+        }
+      }
     }
     await this.audit(user.id, 'connections_refreshed', { count: conns.length });
   }
@@ -88,5 +108,11 @@ export class BrokerOnboardingService {
 
   private async audit(userId: string, action: string, metadata: object) {
     await this.prisma.auditLog.create({ data: { userId, action, metadata } });
+  }
+
+  private accountTypeFrom(acct: { raw_type?: string; meta?: Record<string, unknown> }): string | undefined {
+    const metaType = acct.meta?.brokerage_account_type ?? acct.meta?.type;
+    const type = acct.raw_type ?? (typeof metaType === 'string' ? metaType : undefined);
+    return type?.trim() || undefined;
   }
 }

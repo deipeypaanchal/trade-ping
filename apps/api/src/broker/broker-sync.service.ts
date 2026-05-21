@@ -71,10 +71,11 @@ export class BrokerSyncService {
         const accounts = await this.snap.listAccounts(user.snaptradeUserId, userSecret, conn.id);
         for (const acct of accounts) {
           const acctNameHash = acct.name ? this.crypto.hash(acct.name) : undefined;
+          const accountType = this.accountTypeFrom(acct);
           const dbAcct = await this.prisma.brokerAccount.upsert({
             where: { connectionId_providerAccountId: { connectionId: dbConn.id, providerAccountId: acct.id } },
-            update: { accountNameHash: acctNameHash, status: 'ACTIVE' },
-            create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, status: 'ACTIVE' },
+            update: { accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
+            create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
           });
           const orders = await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'));
           // First sync for an account establishes a baseline: every order returned is
@@ -258,5 +259,11 @@ export class BrokerSyncService {
       update: { value: { at: new Date().toISOString() } },
       create: { userId, accountId, key: 'last_successful_order_sync', value: { at: new Date().toISOString() } },
     });
+  }
+
+  private accountTypeFrom(acct: { raw_type?: string; meta?: Record<string, unknown> }): string | undefined {
+    const metaType = acct.meta?.brokerage_account_type ?? acct.meta?.type;
+    const type = acct.raw_type ?? (typeof metaType === 'string' ? metaType : undefined);
+    return type?.trim() || undefined;
   }
 }

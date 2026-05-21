@@ -73,6 +73,7 @@ export class TelegramController {
         await this.onboarding.refreshConnections(user.id);
         const connections = await this.prisma.brokerConnection.findMany({
           where: { userId: user.id, status: { not: 'DISCONNECTED' } },
+          include: { accounts: { where: { status: { not: 'DISCONNECTED' } }, select: { accountType: true } } },
           orderBy: { updatedAt: 'desc' },
         });
         await this.telegram.sendMessage(chatId, this.statusText(connections));
@@ -176,7 +177,7 @@ export class TelegramController {
     ].join('\n');
   }
 
-  private statusText(connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null }>) {
+  private statusText(connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null; accounts?: Array<{ accountType: string | null }> }>) {
     if (!connections.length) return 'No brokerage connected. Run /connect to get started.';
     const label: Record<string, string> = {
       ACTIVE: 'connected (read-only)',
@@ -186,9 +187,24 @@ export class TelegramController {
     };
     const lines = connections.map((c) => {
       const name = this.escape(c.brokerageName ?? c.brokerageSlug ?? 'Brokerage');
-      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}`;
+      const accountTypes = [...new Set((c.accounts ?? []).flatMap((account) => {
+        const label = this.accountTypeLabel(account.accountType);
+        return label ? [label] : [];
+      }))];
+      const suffix = accountTypes.length ? `; accounts: ${accountTypes.join(', ')}` : '';
+      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}${suffix}`;
     });
     return ['Your connections:', ...lines].join('\n');
+  }
+
+  private accountTypeLabel(type: string | null): string | null {
+    if (!type) return null;
+    const normalized = type.trim().toUpperCase();
+    const labels: Record<string, string> = {
+      DIGITALASSET: 'Crypto',
+      INDIVIDUAL: 'Individual',
+    };
+    return labels[normalized] ?? this.escape(normalized.replace(/[_-]+/g, ' ').toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase()));
   }
 
   private privacyHelpText() {
