@@ -17,6 +17,7 @@ export const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
   TELEGRAM_BOT_TOKEN: z.string().min(1),
+  TELEGRAM_BOT_USERNAME: z.string().regex(/^[A-Za-z0-9_]{5,32}$/).optional(),
   TELEGRAM_WEBHOOK_SECRET: z.string().regex(/^[A-Za-z0-9_-]{16,256}$/),
   SNAPTRADE_CLIENT_ID: z.string().min(1),
   SNAPTRADE_CONSUMER_KEY: z.string().min(1),

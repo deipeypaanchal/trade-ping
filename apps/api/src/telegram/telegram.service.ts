@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Bottleneck from 'bottleneck';
 
+export type TelegramReplyMarkup = {
+  inline_keyboard: Array<Array<{ text: string; url: string }>>;
+};
+
 /**
  * Telegram bot send-message wrapper with built-in rate limiting and 429 retries.
  *
@@ -38,8 +42,8 @@ export class TelegramService {
     });
   }
 
-  async sendMessage(chatId: string, text: string): Promise<{ message_id?: number }> {
-    return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, 0));
+  async sendMessage(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup } = {}): Promise<{ message_id?: number }> {
+    return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, options, 0));
   }
 
   async setWebhook(): Promise<void> {
@@ -48,16 +52,22 @@ export class TelegramService {
     const secret = this.config.get<string>('TELEGRAM_WEBHOOK_SECRET');
     const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'] }),
+      body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true }),
     });
     if (!res.ok) throw new Error(`Telegram setWebhook failed: ${res.status} ${await res.text()}`);
   }
 
-  private async doSend(chatId: string, text: string, attempt: number): Promise<{ message_id?: number }> {
+  private async doSend(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup }, attempt: number): Promise<{ message_id?: number }> {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+      }),
     });
     const body = await res.text();
     if (res.status === 429 && attempt < 2) {
@@ -65,7 +75,7 @@ export class TelegramService {
       try { retryAfterSec = (JSON.parse(body)?.parameters?.retry_after as number) || 1; } catch { /* ignore */ }
       this.logger.warn(`Telegram 429 for chat ${chatId}; retrying in ${retryAfterSec}s`);
       await new Promise((r) => setTimeout(r, (retryAfterSec + 0.2) * 1000));
-      return this.doSend(chatId, text, attempt + 1);
+      return this.doSend(chatId, text, options, attempt + 1);
     }
     if (!res.ok) throw new Error(`Telegram sendMessage failed: ${res.status} ${body}`);
     const json = JSON.parse(body) as { result?: { message_id: number } };
