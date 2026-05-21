@@ -39,14 +39,24 @@ export class TelegramController {
       update: { displayName: this.displayName(msg.from) },
       create: { telegramUserId: String(msg.from.id), displayName: this.displayName(msg.from) },
     });
-    const group = await this.prisma.group.upsert({ where: { telegramChatId: chatId }, update: { name: msg.chat.title }, create: { telegramChatId: chatId, name: msg.chat.title } });
-    await this.prisma.groupMember.upsert({ where: { userId_groupId: { userId: user.id, groupId: group.id } }, update: {}, create: { userId: user.id, groupId: group.id } });
+    const group = await this.groupFor(msg.chat);
+    if (group) {
+      await this.prisma.groupMember.upsert({ where: { userId_groupId: { userId: user.id, groupId: group.id } }, update: {}, create: { userId: user.id, groupId: group.id } });
+    }
 
     try {
       if (this.cmd(text, '/connect')) {
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Run /connect inside the TradePing group where you want alerts to appear. I will DM the private brokerage link from there.');
+          return { ok: true };
+        }
         const url = await this.onboarding.createConnectUrl(user.id, group.id);
         await this.sendConnectLink(msg.chat.type, chatId, String(msg.from.id), url);
       } else if (this.cmd(text, '/privacy')) {
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Privacy is set per group. Run /privacy private, normal, public, or off inside the TradePing group.');
+          return { ok: true };
+        }
         const level = text.split(/\s+/)[1]?.toUpperCase();
         if (!level) await this.telegram.sendMessage(chatId, 'Privacy options: /privacy public, /privacy normal, /privacy private, /privacy off');
         else { await this.privacy.setPrivacy(user.id, group.id, level); await this.telegram.sendMessage(chatId, `Privacy updated to ${level}.`); }
@@ -74,6 +84,15 @@ export class TelegramController {
   }
 
   private cmd(text: string, command: string) { return text === command || text.startsWith(`${command} `) || text.startsWith(`${command}@`); }
+  private groupFor(chat: NonNullable<TelegramUpdate['message']>['chat']) {
+    if (chat.type !== 'group' && chat.type !== 'supergroup') return null;
+    return this.prisma.group.upsert({
+      where: { telegramChatId: String(chat.id) },
+      update: { name: chat.title },
+      create: { telegramChatId: String(chat.id), name: chat.title },
+    });
+  }
+
   private async handleNewChatMembers(msg: NonNullable<TelegramUpdate['message']>) {
     const chatId = String(msg.chat.id);
     const humans = msg.new_chat_members?.filter((member) => !member.is_bot) ?? [];

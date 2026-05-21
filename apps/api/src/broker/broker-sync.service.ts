@@ -19,7 +19,14 @@ export class BrokerSyncService {
   ) {}
 
   async syncUser(userId: string, opts: { suppressBackfill?: boolean } = {}): Promise<{ created: number; alerted: number }> {
-    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId }, include: { memberships: true } });
+    const user = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      include: {
+        memberships: {
+          where: { group: { telegramChatId: { startsWith: '-' } } },
+        },
+      },
+    });
     if (!user.snaptradeUserId || !user.encryptedUserSecret) return { created: 0, alerted: 0 };
     const userSecret = this.crypto.decrypt(user.encryptedUserSecret);
     const connections = await this.snap.listConnections(user.snaptradeUserId, userSecret);
@@ -77,6 +84,7 @@ export class BrokerSyncService {
       }
     }
     await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_completed', metadata: { created, alerted } } });
+    if (created || alerted) this.logger.log(`sync completed for ${userId}: created=${created} alerted=${alerted}`);
     return { created, alerted };
   }
 
