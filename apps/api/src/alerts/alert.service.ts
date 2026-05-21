@@ -53,7 +53,7 @@ export class AlertService {
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(event.symbol)}`];
     if (level !== 'PRIVATE') {
-      const details = this.tradeDetails(event);
+      const details = this.tradeDetails(event, level);
       if (details) lines.push(details);
     }
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
@@ -63,13 +63,13 @@ export class AlertService {
     return lines.join('\n');
   }
 
-  private tradeDetails(event: any): string | null {
+  private tradeDetails(event: any, level: PrivacyLevel): string | null {
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
     const value = event.quantity && event.price ? this.formatCurrency(this.decimal(event.quantity).mul(this.decimal(event.price))) : null;
     const details = [
       quantity ? `Qty: ${quantity}` : null,
-      price ? `Avg price: $${price}` : null,
+      level === 'PUBLIC' && price ? `Avg price: $${price}` : null,
       value ? `Value: ${value}` : null,
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;

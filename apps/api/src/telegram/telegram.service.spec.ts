@@ -19,7 +19,7 @@ const tooManyRequests = (retryAfter = 1) =>
   } as unknown as Response);
 
 function makeService() {
-  const config = new ConfigService({ TELEGRAM_BOT_TOKEN: 'token' });
+  const config = new ConfigService({ TELEGRAM_BOT_TOKEN: 'token', APP_BASE_URL: 'https://tradeping.example', TELEGRAM_WEBHOOK_SECRET: 'secret' });
   return new TelegramService(config);
 }
 
@@ -61,4 +61,24 @@ describe('TelegramService', () => {
     const svc = makeService();
     await expect(svc.sendMessage('chat-3', 'hello')).rejects.toBeInstanceOf(TelegramApiError);
   }, 10_000);
+
+  it('publishes launch-facing command menu entries', async () => {
+    fetchMock.mockResolvedValue(okResponse());
+    const svc = makeService();
+
+    await svc.setMyCommands();
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.commands.map((cmd: { command: string }) => cmd.command)).toEqual([
+      'connect',
+      'privacy',
+      'trust',
+      'setup',
+      'timezone',
+      'status',
+      'sync',
+      'disconnect',
+      'help',
+    ]);
+  });
 });

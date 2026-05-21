@@ -57,7 +57,7 @@ export class TelegramController {
         await this.sendConnectLink(msg.chat.type, chatId, String(msg.from.id), url);
       } else if (this.cmd(text, '/privacy')) {
         if (!group) {
-          await this.telegram.sendMessage(chatId, 'Privacy is per group. Run /privacy public, normal, private, or off inside your TradePing group.');
+          await this.telegram.sendMessage(chatId, 'Privacy is per user, per group. Run /privacy public, normal, private, or off inside the TradePing group you want to change.');
           return { ok: true };
         }
         const level = text.split(/\s+/)[1]?.toUpperCase();
@@ -65,9 +65,9 @@ export class TelegramController {
           await this.telegram.sendMessage(chatId, this.privacyHelpText());
         } else {
           await this.privacy.setPrivacy(user.id, group.id, level);
-          await this.telegram.sendMessage(chatId, `Alert visibility set to <b>${level}</b> for this group.`);
+          await this.telegram.sendMessage(chatId, `Alert visibility set to <b>${level}</b> for your alerts in this group.`);
         }
-      } else if (this.cmd(text, '/setup')) {
+      } else if (this.cmd(text, '/setup') || this.cmd(text, '/guide')) {
         await this.telegram.sendMessage(chatId, this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
       } else if (this.cmd(text, '/status')) {
         await this.onboarding.refreshConnections(user.id);
@@ -78,7 +78,7 @@ export class TelegramController {
         await this.telegram.sendMessage(chatId, this.statusText(connections));
       } else if (this.cmd(text, '/sync')) {
         await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
-        await this.telegram.sendMessage(chatId, 'Sync queued — new executions will alert here shortly.');
+        await this.telegram.sendMessage(chatId, 'Sync queued. This is just a manual check; TradePing already watches automatically in the background.');
       } else if (this.cmd(text, '/timezone')) {
         const tz = text.split(/\s+/)[1];
         if (!tz) {
@@ -92,6 +92,8 @@ export class TelegramController {
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
         await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
+      } else if (this.cmd(text, '/trust')) {
+        await this.telegram.sendMessage(chatId, this.trustText());
       } else if (this.cmd(text, '/help') || this.cmd(text, '/start')) {
         await this.telegram.sendMessage(chatId, this.helpText(msg.chat.type), { replyMarkup: msg.chat.type === 'private' ? undefined : this.privateStartKeyboard() });
       }
@@ -133,7 +135,14 @@ export class TelegramController {
   }
 
   private async sendConnectLink(chatType: string, chatId: string, telegramUserId: string, url: string) {
-    const text = `Connect your brokerage (read-only):\n${url}\n\nThe link expires in ~5 minutes. Run /disconnect anytime to revoke access.`;
+    const text = [
+      'Connect your brokerage with SnapTrade read-only access:',
+      url,
+      '',
+      'TradePing can read executed trades and positions for alerts. It cannot place trades, move money, or see your brokerage password.',
+      '',
+      'The link expires in about 5 minutes. Run /disconnect anytime to revoke access.',
+    ].join('\n');
     if (chatType === 'private') {
       await this.telegram.sendMessage(chatId, text);
       return;
@@ -152,16 +161,29 @@ export class TelegramController {
 
   private helpText(chatType: string) {
     if (chatType === 'private') {
-      return 'You\'re ready. Go back to your TradePing group and run /connect there — I\'ll DM your read-only brokerage link, and your trade alerts will post in that group.';
+      return [
+        'TradePing is ready for private setup.',
+        '',
+        'Next steps:',
+        '1. Go back to your TradePing group.',
+        '2. Run /connect there.',
+        '3. I will DM your private read-only brokerage link.',
+        '',
+        'Use /trust in the group to see exactly what is bot-level, user-level, and group-level.',
+      ].join('\n');
     }
     return [
       'TradePing posts read-only trade alerts to this group.',
       '',
       '/connect — connect a read-only brokerage',
       '/privacy — public, normal, private, or off',
+      '/trust — what data is bot, user, and group level',
+      '/setup — post the group onboarding guide again',
       '/timezone — set IANA timezone (e.g. Europe/London)',
       '/status — your connection status',
       '/disconnect — remove your connections',
+      '',
+      'Normal setup: tap Start private setup once, then run /connect here. After that, alerts are automatic.',
     ].join('\n');
   }
 
@@ -182,9 +204,10 @@ export class TelegramController {
 
   private privacyHelpText() {
     return [
-      'Set how your trades appear in this group:',
-      '/privacy public  — name, symbol, quantity, price and value',
-      '/privacy normal  — name, symbol, quantity, price and value (default)',
+      'Set how your trades appear in this group.',
+      'This is per user, per group:',
+      '/privacy public  — name, symbol, quantity, avg price, value and broker',
+      '/privacy normal  — name, symbol, quantity, value and broker (default)',
       '/privacy private — anonymous, symbol only',
       '/privacy off     — no alerts',
     ].join('\n');
@@ -198,9 +221,32 @@ export class TelegramController {
       'To share your trades here:',
       '1. Tap <b>Start private setup</b> so I can DM you safely.',
       '2. Come back and run /connect.',
-      '3. Set visibility with /privacy (public, normal, private, off).',
+      '3. Set your group visibility with /privacy.',
       '',
-      'Alerts are read-only — TradePing never sees your login and can never place trades.',
+      'Each member connects their own read-only brokerage. This group only receives alerts for members who connected here.',
+      '',
+      'Run /trust to see what is bot-level, user-level, and group-level.',
+    ].join('\n');
+  }
+
+  private trustText() {
+    return [
+      '<b>TradePing trust model</b>',
+      '',
+      '<b>Bot level</b>',
+      'Shared infrastructure: Telegram bot, SnapTrade API, Railway, database, Redis, and background sync.',
+      '',
+      '<b>User level</b>',
+      'Your Telegram identity, read-only SnapTrade connection, broker accounts, detected trades/positions, and timezone. /disconnect revokes your brokerage connections.',
+      '',
+      '<b>Group level</b>',
+      'The Telegram group destination and which connected members can post alerts here.',
+      '',
+      '<b>Per-user per-group level</b>',
+      '/privacy controls only your alerts in this group. You can be public here, private elsewhere, or off in another group.',
+      '',
+      '<b>Safety</b>',
+      'TradePing uses read-only access. It cannot place trades, transfer money, or see your brokerage password.',
     ].join('\n');
   }
 

@@ -65,7 +65,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Value: $1234567899.87');
   });
 
-  it('shows size details in normal privacy mode', async () => {
+  it('shows quantity and value in normal privacy mode', async () => {
     const event = makeEvent();
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
@@ -73,8 +73,18 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('Avg price: $150.25');
     expect(sentTexts[0]).toContain('Value: $1502.50');
+    expect(sentTexts[0]).not.toContain('Avg price:');
+  });
+
+  it('adds average price in public privacy mode', async () => {
+    const event = makeEvent();
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Avg price: $150.25');
   });
 
   it('hides size details in private privacy mode', async () => {
