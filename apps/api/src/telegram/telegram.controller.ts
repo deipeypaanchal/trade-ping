@@ -8,6 +8,8 @@ import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
 import { PrivacyService } from '../privacy/privacy.service';
 
+const VALID_PRIVACY = new Set(['PUBLIC', 'NORMAL', 'PRIVATE', 'OFF']);
+
 @Controller('telegram')
 export class TelegramController {
   constructor(
@@ -47,32 +49,36 @@ export class TelegramController {
     try {
       if (this.cmd(text, '/connect')) {
         if (!group) {
-          await this.telegram.sendMessage(chatId, 'Run /connect inside the TradePing group where you want alerts to appear. I will DM the private brokerage link from there.');
+          await this.telegram.sendMessage(chatId, 'Run /connect inside your TradePing group so alerts post there. I\'ll DM you the private link.');
           return { ok: true };
         }
         const url = await this.onboarding.createConnectUrl(user.id, group.id);
         await this.sendConnectLink(msg.chat.type, chatId, String(msg.from.id), url);
       } else if (this.cmd(text, '/privacy')) {
         if (!group) {
-          await this.telegram.sendMessage(chatId, 'Privacy is set per group. Run /privacy private, normal, public, or off inside the TradePing group.');
+          await this.telegram.sendMessage(chatId, 'Privacy is per group. Run /privacy public, normal, private, or off inside your TradePing group.');
           return { ok: true };
         }
         const level = text.split(/\s+/)[1]?.toUpperCase();
-        if (!level) await this.telegram.sendMessage(chatId, 'Privacy options: /privacy public, /privacy normal, /privacy private, /privacy off');
-        else { await this.privacy.setPrivacy(user.id, group.id, level); await this.telegram.sendMessage(chatId, `Privacy updated to ${level}.`); }
+        if (!level || !VALID_PRIVACY.has(level)) {
+          await this.telegram.sendMessage(chatId, this.privacyHelpText());
+        } else {
+          await this.privacy.setPrivacy(user.id, group.id, level);
+          await this.telegram.sendMessage(chatId, `Alert visibility set to <b>${level}</b> for this group.`);
+        }
       } else if (this.cmd(text, '/setup')) {
         await this.telegram.sendMessage(chatId, this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
       } else if (this.cmd(text, '/status')) {
         await this.onboarding.refreshConnections(user.id);
         const connections = await this.prisma.brokerConnection.findMany({ where: { userId: user.id }, orderBy: { updatedAt: 'desc' } });
-        const summary = connections.length ? connections.map(c => `${c.status}: ${c.brokerageName ?? c.brokerageSlug ?? 'Brokerage'} (${c.connectionType ?? 'read'})`).join('\n') : 'No brokerage connected yet. Use /connect.';
+        const summary = connections.length ? connections.map(c => `${c.status}: ${c.brokerageName ?? c.brokerageSlug ?? 'Brokerage'} (${c.connectionType ?? 'read'})`).join('\n') : 'No brokerage connected yet. Run /connect to get started.';
         await this.telegram.sendMessage(chatId, summary);
       } else if (this.cmd(text, '/sync')) {
         await this.queue.add('sync-user', { userId: user.id }, { removeOnComplete: 100, attempts: 3, backoff: { type: 'exponential', delay: 5000 } });
-        await this.telegram.sendMessage(chatId, 'Sync queued. Alerts will appear in this group as new executions arrive.');
+        await this.telegram.sendMessage(chatId, 'Sync queued — new executions will alert here shortly.');
       } else if (this.cmd(text, '/disconnect')) {
         const count = await this.onboarding.disconnectAll(user.id);
-        await this.telegram.sendMessage(chatId, `Disconnected ${count} brokerage connection(s).`);
+        await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
       } else if (this.cmd(text, '/help') || this.cmd(text, '/start')) {
         await this.telegram.sendMessage(chatId, this.helpText(msg.chat.type), { replyMarkup: msg.chat.type === 'private' ? undefined : this.privateStartKeyboard() });
       }
@@ -94,48 +100,68 @@ export class TelegramController {
   }
 
   private async handleNewChatMembers(msg: NonNullable<TelegramUpdate['message']>) {
-    const chatId = String(msg.chat.id);
-    const humans = msg.new_chat_members?.filter((member) => !member.is_bot) ?? [];
-    if (humans.length === 0) {
-      await this.telegram.sendMessage(chatId, this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
-      return;
-    }
-    const names = humans.slice(0, 3).map((member) => this.escape(this.displayName(member))).join(', ');
-    const suffix = humans.length > 3 ? ` and ${humans.length - 3} more` : '';
-    await this.telegram.sendMessage(
-      chatId,
-      `Welcome ${names}${suffix}.\n\nTo share verified trade alerts here:\n1. Tap <b>Start private setup</b>.\n2. Come back to this group and run /connect.\n3. Pick privacy with /privacy private, normal, public, or off.`,
-      { replyMarkup: this.privateStartKeyboard() },
-    );
+    // Greet only once — when TradePing itself is added. Stay silent on member
+    // joins so the group never gets spammed with per-join welcome messages.
+    const botUsername = (this.config.get<string>('TELEGRAM_BOT_USERNAME') ?? '').toLowerCase();
+    const botAdded = msg.new_chat_members?.some((m) => m.is_bot && m.username?.toLowerCase() === botUsername) ?? false;
+    if (!botAdded) return;
+    await this.telegram.sendMessage(String(msg.chat.id), this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
   }
 
   private async sendConnectLink(chatType: string, chatId: string, telegramUserId: string, url: string) {
-    const text = `Connect your brokerage read-only here:\n${url}\n\nThe link expires in about 5 minutes. Use /disconnect anytime.`;
+    const text = `Connect your brokerage (read-only):\n${url}\n\nThe link expires in ~5 minutes. Run /disconnect anytime to revoke access.`;
     if (chatType === 'private') {
       await this.telegram.sendMessage(chatId, text);
       return;
     }
     try {
       await this.telegram.sendMessage(telegramUserId, text);
-      await this.telegram.sendMessage(chatId, 'I sent your private brokerage connection link in DM.');
+      await this.telegram.sendMessage(chatId, 'Sent your private connection link in DM.');
     } catch {
       await this.telegram.sendMessage(
         chatId,
-        'I need permission to DM your private brokerage link.\n\nTap <b>Start private setup</b>, press Start there, then come back and run /connect again.',
+        'I can\'t DM you yet. Tap <b>Start private setup</b>, press Start, then run /connect here again.',
         { replyMarkup: this.privateStartKeyboard() },
       );
     }
   }
+
   private helpText(chatType: string) {
     if (chatType === 'private') {
-      return 'You are ready to receive private setup links.\n\nNext: go back to your TradePing group and run /connect there. I will DM you the read-only brokerage link and future trade alerts will post in that group.';
+      return 'You\'re ready. Go back to your TradePing group and run /connect there — I\'ll DM your read-only brokerage link, and your trade alerts will post in that group.';
     }
-    return 'TradePing setup:\n/setup - post the member setup instructions\n/connect - connect read-only brokerage\n/privacy - set alert privacy\n/status - connection status\n/sync - manual sync\n/disconnect - revoke brokerage connections';
+    return [
+      'TradePing posts read-only trade alerts to this group.',
+      '',
+      '/connect — connect a read-only brokerage',
+      '/privacy — public, normal, private, or off',
+      '/status — your connection status',
+      '/disconnect — remove your connections',
+    ].join('\n');
+  }
+
+  private privacyHelpText() {
+    return [
+      'Set how your trades appear in this group:',
+      '/privacy public — name, symbol, quantity and price',
+      '/privacy normal — name and symbol only (default)',
+      '/privacy private — anonymous, symbol only',
+      '/privacy off — no alerts',
+    ].join('\n');
   }
 
   private groupSetupText(chatTitle?: string) {
     const name = chatTitle ? `<b>${this.escape(chatTitle)}</b>` : 'this group';
-    return `TradePing is ready for ${name}.\n\nFor each member:\n1. Tap <b>Start private setup</b> once so I can DM them safely.\n2. Return here and run /connect.\n3. Choose privacy with /privacy private, normal, public, or off.\n\nAfter a member connects, executed trades from their read-only brokerage connection will alert in this group.`;
+    return [
+      `TradePing is ready for ${name}.`,
+      '',
+      'To share your trades here:',
+      '1. Tap <b>Start private setup</b> so I can DM you safely.',
+      '2. Come back and run /connect.',
+      '3. Set visibility with /privacy (public, normal, private, off).',
+      '',
+      'Alerts are read-only — TradePing never sees your login and can never place trades.',
+    ].join('\n');
   }
 
   private privateStartKeyboard() {

@@ -1,10 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Bottleneck from 'bottleneck';
 
 export type TelegramReplyMarkup = {
   inline_keyboard: Array<Array<{ text: string; url: string }>>;
 };
+
+export class TelegramApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'TelegramApiError';
+  }
+}
 
 /**
  * Telegram bot send-message wrapper with built-in rate limiting and 429 retries.
@@ -20,7 +27,7 @@ export type TelegramReplyMarkup = {
  *   - On HTTP 429, honor `retry_after` from the response body and retry once.
  */
 @Injectable()
-export class TelegramService {
+export class TelegramService implements OnModuleInit {
   private readonly logger = new Logger(TelegramService.name);
   private readonly globalLimiter = new Bottleneck({
     reservoir: 25,
@@ -42,6 +49,28 @@ export class TelegramService {
     });
   }
 
+  /**
+   * Register the webhook and command menu on boot so a fresh deploy is live with
+   * no manual curl step. Skipped (with a warning) while APP_BASE_URL / the bot
+   * token are still placeholders, e.g. local dev without a public tunnel.
+   * Failures are logged, never fatal — the API should still come up.
+   */
+  async onModuleInit(): Promise<void> {
+    const baseUrl = this.config.get<string>('APP_BASE_URL') ?? '';
+    const token = this.config.get<string>('TELEGRAM_BOT_TOKEN') ?? '';
+    if (!baseUrl.startsWith('https://') || baseUrl.includes('your-domain.com') || token.includes('replace_me')) {
+      this.logger.warn('Skipping Telegram registration: set a public https APP_BASE_URL and a real TELEGRAM_BOT_TOKEN, then restart to go live.');
+      return;
+    }
+    try {
+      await this.setWebhook();
+      await this.setMyCommands();
+      this.logger.log('Telegram webhook and command menu registered');
+    } catch (e) {
+      this.logger.error(`Telegram startup registration failed: ${(e as Error).message}`);
+    }
+  }
+
   async sendMessage(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup } = {}): Promise<{ message_id?: number }> {
     return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, options, 0));
   }
@@ -54,7 +83,24 @@ export class TelegramService {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true }),
     });
-    if (!res.ok) throw new Error(`Telegram setWebhook failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new TelegramApiError(`Telegram setWebhook failed: ${res.status} ${await res.text()}`, res.status);
+  }
+
+  /** Publishes the slash-command menu users see in the Telegram UI. */
+  async setMyCommands(): Promise<void> {
+    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    const commands = [
+      { command: 'connect', description: 'Connect a read-only brokerage' },
+      { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
+      { command: 'status', description: 'Show your brokerage connection status' },
+      { command: 'disconnect', description: 'Remove your brokerage connections' },
+      { command: 'help', description: 'How TradePing works' },
+    ];
+    const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ commands }),
+    });
+    if (!res.ok) throw new TelegramApiError(`Telegram setMyCommands failed: ${res.status} ${await res.text()}`, res.status);
   }
 
   private async doSend(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup }, attempt: number): Promise<{ message_id?: number }> {
@@ -77,7 +123,7 @@ export class TelegramService {
       await new Promise((r) => setTimeout(r, (retryAfterSec + 0.2) * 1000));
       return this.doSend(chatId, text, options, attempt + 1);
     }
-    if (!res.ok) throw new Error(`Telegram sendMessage failed: ${res.status} ${body}`);
+    if (!res.ok) throw new TelegramApiError(`Telegram sendMessage failed: ${res.status} ${body}`, res.status);
     const json = JSON.parse(body) as { result?: { message_id: number } };
     return { message_id: json.result?.message_id };
   }

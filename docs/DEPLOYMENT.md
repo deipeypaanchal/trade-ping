@@ -216,7 +216,22 @@ pnpm db:deploy                                  # prod
 
 ## 8. Telegram webhook setup
 
-After the service is live at `https://bot.example.com`, register the webhook **once**:
+**This is automatic.** On startup the service registers the webhook **and** the
+slash-command menu itself (see `TelegramService.onModuleInit`), as long as
+`APP_BASE_URL` is a public `https://` URL and `TELEGRAM_BOT_TOKEN` is real.
+If those are still placeholders it logs a warning and skips registration, so
+just set them and redeploy. Failures are logged but never crash the service.
+
+Verify after deploy:
+
+```bash
+curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+```
+
+You should see your URL, `pending_update_count: 0`, and `last_error_message: null`.
+
+If you change the domain or webhook secret, just restart the service — it
+re-registers on boot. To register manually (e.g. without redeploying):
 
 ```bash
 curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
@@ -228,16 +243,6 @@ curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
         \"drop_pending_updates\":true
       }"
 ```
-
-Verify:
-
-```bash
-curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
-```
-
-You should see `pending_update_count: 0` and `last_error_message: null`.
-
-If you ever change the domain or webhook secret, re-run `setWebhook`.
 
 ---
 

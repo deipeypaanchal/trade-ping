@@ -35,16 +35,14 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 2. Provision Postgres and Redis.
 3. Set all env vars from `.env.example`.
 4. Run Prisma migrations with `pnpm db:deploy`.
-5. Configure Telegram webhook:
-
-```bash
-curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -H "content-type: application/json" \
-  -d "{\"url\":\"$APP_BASE_URL/telegram/webhook\",\"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\",\"allowed_updates\":[\"message\"]}"
-```
-
+5. Start the service. It auto-registers the Telegram webhook and command menu on
+   boot once `APP_BASE_URL` is a public `https://` URL and `TELEGRAM_BOT_TOKEN`
+   is real. Confirm with `getWebhookInfo`.
 6. Configure SnapTrade webhook listener to `$APP_BASE_URL/snaptrade/webhook`.
-7. Schedule `POST /jobs/sync-all` every 5 minutes with `Authorization: Bearer $INTERNAL_JOB_SECRET` if you are not relying only on SnapTrade webhooks.
+   For real-time alerts, ask SnapTrade support to enable `TRADE_DETECTION` for
+   your `clientId`.
+7. The service auto-syncs every `SYNC_INTERVAL_MINUTES` as a safety net. You can
+   also schedule `POST /jobs/sync-all` with `Authorization: Bearer $INTERNAL_JOB_SECRET`.
 
 ## Bot commands
 

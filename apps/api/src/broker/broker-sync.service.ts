@@ -47,10 +47,16 @@ export class BrokerSyncService {
           create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, status: 'ACTIVE' },
         });
         const orders = await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'));
+        // First sync for an account establishes a baseline: every order returned is
+        // pre-existing history, so suppress it all rather than flooding the group.
+        // After the baseline, only genuinely stale orders (older than the suppress
+        // window, e.g. a broker surfacing a backdated fill) are suppressed.
+        const isFirstSync = !(await this.hasSyncState(userId, dbAcct.id));
+        const staleCutoff = Date.now() - this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS') * 3600_000;
         for (const order of orders) {
           const norm = this.detector.normalizeOrder(userId, acct.id, order);
           if (!norm) continue;
-          const suppress = opts.suppressBackfill || await this.shouldSuppressAsBackfill(userId, dbAcct.id, norm.tradeTime);
+          const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
           for (const member of user.memberships) {
             const trade = await this.prisma.tradeEvent.upsert({
               where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
@@ -75,8 +81,11 @@ export class BrokerSyncService {
             });
             if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
             if (!suppress && trade.alertStatus === 'PENDING') {
-              const sent = await this.alerts.sendTradeAlert(trade.id);
-              if (sent) alerted += 1;
+              try {
+                if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+              } catch (e) {
+                this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+              }
             }
           }
         }
@@ -88,20 +97,22 @@ export class BrokerSyncService {
     return { created, alerted };
   }
 
-  async syncAll(): Promise<void> {
+  /** IDs of every user that has completed SnapTrade registration and can be synced. */
+  async listSyncableUserIds(): Promise<string[]> {
     const users = await this.prisma.user.findMany({ where: { snaptradeUserId: { not: null }, encryptedUserSecret: { not: null } }, select: { id: true } });
-    for (const u of users) {
-      try { await this.syncUser(u.id); } catch (e) { this.logger.error(`sync failed for ${u.id}: ${(e as Error).message}`); }
+    return users.map((u) => u.id);
+  }
+
+  /** Inline sync of every user. Used by the admin `sync-all-now` endpoint; the queue path fans out instead. */
+  async syncAll(): Promise<void> {
+    for (const id of await this.listSyncableUserIds()) {
+      try { await this.syncUser(id); } catch (e) { this.logger.error(`sync failed for ${id}: ${(e as Error).message}`); }
     }
   }
 
-  private async shouldSuppressAsBackfill(userId: string, accountId: string, tradeTime: Date): Promise<boolean> {
+  private async hasSyncState(userId: string, accountId: string): Promise<boolean> {
     const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
-    if (!state) {
-      const cutoff = Date.now() - this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS') * 3600_000;
-      return tradeTime.getTime() < cutoff;
-    }
-    return false;
+    return state !== null;
   }
 
   private async markSynced(userId: string, accountId: string) {

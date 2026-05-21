@@ -1,12 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { AlertStatus, PrivacyLevel } from '@prisma/client';
 import { PrismaService } from '../config/prisma.service';
-import { TelegramService } from '../telegram/telegram.service';
+import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 
 @Injectable()
 export class AlertService {
+  private readonly logger = new Logger(AlertService.name);
   constructor(private prisma: PrismaService, private telegram: TelegramService) {}
 
+  /**
+   * Delivers one trade alert. Never throws: a failed send must not abort the
+   * surrounding sync (which may still have other accounts/members to process).
+   *  - success -> mark SENT, return true
+   *  - permanent failure (chat gone, bot removed/blocked: 4xx except 429) -> mark SKIPPED
+   *  - transient failure (5xx/429/network) -> leave PENDING so the next sync retries
+   */
   async sendTradeAlert(tradeEventId: string): Promise<boolean> {
     const event = await this.prisma.tradeEvent.findUniqueOrThrow({
       where: { id: tradeEventId },
@@ -22,8 +30,14 @@ export class AlertService {
       await this.mark(event.id, 'SENT');
       return true;
     } catch (e) {
-      await this.mark(event.id, 'FAILED');
-      throw e;
+      const status = e instanceof TelegramApiError ? e.status : undefined;
+      if (status && status >= 400 && status < 500 && status !== 429) {
+        this.logger.warn(`permanent alert failure for trade ${event.id} (HTTP ${status}); marking SKIPPED`);
+        await this.mark(event.id, 'SKIPPED');
+        return false;
+      }
+      this.logger.warn(`transient alert failure for trade ${event.id}: ${(e as Error).message}; staying PENDING for retry`);
+      return false;
     }
   }
 
