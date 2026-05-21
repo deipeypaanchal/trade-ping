@@ -30,6 +30,28 @@ describe('TradeDetectorService', () => {
     });
     expect(out).toEqual({ symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' });
   });
+
+  it('combines whole and fractional position units when SnapTrade separates them', () => {
+    const out = svc.normalizePosition({
+      symbol: { symbol: { id: 'sym-aapl', symbol: 'AAPL' } },
+      units: 1,
+      fractional_units: '0.2393',
+      average_purchase_price: '242.13',
+    });
+
+    expect(out?.quantity).toBeCloseTo(1.2393);
+  });
+
+  it('does not double count when units already includes the fractional quantity', () => {
+    const out = svc.normalizePosition({
+      symbol: { symbol: { id: 'sym-aapl', symbol: 'AAPL' } },
+      units: '1.2393',
+      fractional_units: '0.2393',
+    });
+
+    expect(out?.quantity).toBe(1.2393);
+  });
+
   it('turns position increases into stable buy deltas', () => {
     const previous = { symbol: 'COIN', symbolId: 'sym-coin', quantity: 1, price: 200, currency: 'USD' };
     const current = { symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' };
@@ -38,6 +60,8 @@ describe('TradeDetectorService', () => {
     expect(first?.side).toBe('BUY');
     expect(first?.quantity).toBe(4);
     expect(first?.symbol).toBe('COIN');
+    expect(first?.price).toBeUndefined();
+    expect(first?.rawStatus).toBe('INFERRED');
     expect(second?.dedupeHash).toBe(first?.dedupeHash);
   });
 });

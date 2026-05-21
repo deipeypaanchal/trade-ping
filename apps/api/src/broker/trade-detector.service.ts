@@ -59,7 +59,7 @@ export class TradeDetectorService {
   normalizePosition(position: SnapTradePosition): PositionSnapshotEntry | null {
     const symbol = this.extractPositionSymbol(position);
     if (!symbol) return null;
-    const quantity = this.toNumber(position.units ?? position.quantity ?? position.fractional_units);
+    const quantity = this.positionQuantity(position);
     if (quantity === undefined || quantity < 0) return null;
     const price = this.toNumber(position.average_purchase_price ?? position.price);
     const currency = typeof position.currency === 'string' ? position.currency : position.currency?.code ?? position.symbol?.currency?.code;
@@ -93,7 +93,6 @@ export class TradeDetectorService {
       symbol: source.symbol,
       side,
       quantity: Math.abs(currentQuantity - previousQuantity),
-      price: current?.price ?? previous?.price,
       currency: current?.currency ?? previous?.currency ?? 'USD',
       tradeTime: now,
       rawType: 'position_delta',
@@ -114,6 +113,19 @@ export class TradeDetectorService {
     if (position.universal_symbol?.symbol) return { symbol: position.universal_symbol.symbol, id: position.universal_symbol.id };
     if (position.universal_symbol?.raw_symbol) return { symbol: position.universal_symbol.raw_symbol, id: position.universal_symbol.id };
     return null;
+  }
+
+  private positionQuantity(position: SnapTradePosition): number | undefined {
+    const quantity = this.toNumber(position.quantity);
+    if (quantity !== undefined) return quantity;
+
+    const units = this.toNumber(position.units);
+    const fractionalUnits = this.toNumber(position.fractional_units);
+    if (units !== undefined && fractionalUnits !== undefined) {
+      return Number.isInteger(units) && fractionalUnits > 0 && fractionalUnits < 1 ? units + fractionalUnits : units;
+    }
+
+    return units ?? fractionalUnits;
   }
 
   private toNumber(v: unknown): number | undefined {

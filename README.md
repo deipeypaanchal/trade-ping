@@ -58,10 +58,12 @@ For no-credential local smoke tests, set `SNAPTRADE_USE_MOCK=true`.
 
 ## Privacy levels
 
-- `PUBLIC`: display name + ticker + side + quantity + average price + value + broker.
-- `NORMAL`: display name + ticker + side + quantity + value + broker.
+- `PUBLIC`: display name + ticker + side + quantity + average price + value + broker when the broker exposes order fill data.
+- `NORMAL`: display name + ticker + side + quantity + value + broker when the broker exposes order fill data.
 - `PRIVATE`: anonymous + ticker + side only.
 - `OFF`: no group alerts.
+
+When a broker does not expose an order but positions changed, TradePing can infer the side and quantity. Inferred alerts intentionally say the fill price is unavailable instead of showing a misleading dollar value.
 
 ## Trust model
 

@@ -64,13 +64,15 @@ export class AlertService {
   }
 
   private tradeDetails(event: any, level: PrivacyLevel): string | null {
+    const inferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
-    const value = event.quantity && event.price ? this.formatCurrency(this.decimal(event.quantity).mul(this.decimal(event.price))) : null;
+    const value = !inferred && event.quantity && event.price ? this.formatCurrency(this.decimal(event.quantity).mul(this.decimal(event.price))) : null;
     const details = [
       quantity ? `Qty: ${quantity}` : null,
-      level === 'PUBLIC' && price ? `Avg price: $${price}` : null,
+      level === 'PUBLIC' && !inferred && price ? `Avg price: $${price}` : null,
       value ? `Value: ${value}` : null,
+      inferred ? 'Fill price unavailable; inferred from position change.' : null,
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;
   }

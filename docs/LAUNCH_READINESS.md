@@ -21,7 +21,7 @@ The `/trust` command mirrors this model in Telegram.
 - Liveness: `/livez` is available for a cheap process-only check.
 - Jobs: BullMQ queue in Redis, worker concurrency 2, job limiter 30 jobs/minute.
 - Sync: automatic `sync-all` every `SYNC_INTERVAL_MINUTES`, currently intended to be 1 minute for beta.
-- Data source: SnapTrade orders first, position-delta fallback when orders are missing but holdings change.
+- Data source: SnapTrade orders first, position-delta fallback when orders are missing but holdings change. Inferred position alerts show quantity only and do not label position prices as execution fills.
 - Telegram: per-chat and global Bottleneck rate limits plus 429 retry handling.
 
 ## Railway capacity read

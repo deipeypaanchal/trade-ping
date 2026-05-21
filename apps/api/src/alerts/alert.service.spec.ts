@@ -87,6 +87,19 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Avg price: $150.25');
   });
 
+  it('does not present inferred position prices as execution value', async () => {
+    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED' });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Qty: 10');
+    expect(sentTexts[0]).toContain('Fill price unavailable; inferred from position change.');
+    expect(sentTexts[0]).not.toContain('Avg price:');
+    expect(sentTexts[0]).not.toContain('Value:');
+  });
+
   it('hides size details in private privacy mode', async () => {
     const event = makeEvent();
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PRIVATE' } });
