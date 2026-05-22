@@ -9,7 +9,7 @@ Alerts are best-effort near-real-time where broker data supports it. Fidelity an
 ## What Users See
 
 - A group setup flow that keeps brokerage links private in DM.
-- Read-only alerts with ticker, side, quantity, value, broker, and a not-financial-advice reminder.
+- Read-only alerts with ticker, side, quantity, price/value when available, estimated sell P/L when cost basis is available, broker, and a not-financial-advice reminder.
 - Per-user, per-group privacy: public, normal, private, or off.
 - `/trust` to explain bot-level, user-level, group-level, and per-group data.
 - `/diagnostics` and `/groupstatus` for support when a trade does not appear.
@@ -71,12 +71,12 @@ The service registers the Telegram webhook and command menu automatically on boo
 
 ## Privacy Levels
 
-- `PUBLIC`: name, ticker, side, quantity, average price, value, and broker when order fill data is available.
-- `NORMAL`: name, ticker, side, quantity, value, and broker when order fill data is available.
+- `PUBLIC`: name, ticker, side, quantity, average price, value, estimated sell P/L, and broker when available.
+- `NORMAL`: name, ticker, side, quantity, average price, value, estimated sell P/L, and broker when available.
 - `PRIVATE`: anonymous member, ticker, and side only.
 - `OFF`: no group alerts.
 
-When a broker does not expose an order but positions changed, TradePing can infer side and quantity. Inferred alerts intentionally say fill price is unavailable instead of showing a misleading dollar value.
+When a broker does not expose an order but positions changed, TradePing can infer side and quantity. If SnapTrade exposes position cost basis, inferred alerts show estimated cost/value and clearly say the fill price is unavailable.
 
 ## Broker Freshness
 

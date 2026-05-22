@@ -38,6 +38,7 @@ export type SnapTradeOrder = {
   price?: number | string;
   average_fill_price?: number | string;
   execution_price?: number | string;
+  limit_price?: number | string;
   created_date?: string;
   updated_date?: string;
   filled_date?: string;
@@ -75,6 +76,7 @@ export type SnapTradePosition = {
   price?: number | string;
   cost_basis?: number | string;
   average_purchase_price?: number | string;
+  open_pnl?: number | string;
   currency?: string | { code?: string };
 };
 

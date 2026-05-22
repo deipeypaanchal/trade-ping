@@ -28,7 +28,7 @@ describe('TradeDetectorService', () => {
       units: 5,
       average_purchase_price: '231.368',
     });
-    expect(out).toEqual({ symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, currency: 'USD' });
+    expect(out).toEqual({ symbol: 'COIN', symbolId: 'sym-coin', quantity: 5, price: 231.368, marketPrice: undefined, openPnl: undefined, currency: 'USD' });
   });
 
   it('normalizes unified SnapTrade position shapes', () => {
@@ -39,7 +39,7 @@ describe('TradeDetectorService', () => {
       cost_basis: '299.95',
     });
 
-    expect(out).toEqual({ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1.25, price: 299.95, currency: 'USD' });
+    expect(out).toEqual({ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1.25, price: 299.95, marketPrice: 301.1, openPnl: undefined, currency: 'USD' });
   });
 
   it('combines whole and fractional position units when SnapTrade separates them', () => {
@@ -71,7 +71,8 @@ describe('TradeDetectorService', () => {
     expect(first?.side).toBe('BUY');
     expect(first?.quantity).toBe(4);
     expect(first?.symbol).toBe('COIN');
-    expect(first?.price).toBeUndefined();
+    expect(first?.price).toBe(231.368);
+    expect(first?.priceSource).toBe('POSITION_COST_BASIS');
     expect(first?.rawStatus).toBe('INFERRED');
     expect(second?.dedupeHash).toBe(first?.dedupeHash);
   });

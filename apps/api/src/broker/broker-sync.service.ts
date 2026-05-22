@@ -77,6 +77,7 @@ export class BrokerSyncService {
             update: { accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
             create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
           });
+          const previousSnapshot = await this.positionSnapshot(userId, dbAcct.id);
           const orders = [
             ...(await this.snap.listRecentAccountOrders(user.snaptradeUserId, userSecret, acct.id)),
             ...(await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'))),
@@ -93,6 +94,7 @@ export class BrokerSyncService {
             if (!norm) continue;
             if (seenOrderHashes.has(norm.dedupeHash)) continue;
             seenOrderHashes.add(norm.dedupeHash);
+            const profit = this.estimateProfit(norm, previousSnapshot);
             const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
             for (const member of user.memberships) {
               const trade = await this.prisma.tradeEvent.upsert({
@@ -106,6 +108,9 @@ export class BrokerSyncService {
                   side: norm.side,
                   quantity: norm.quantity,
                   price: norm.price,
+                  priceSource: norm.priceSource,
+                  profitLoss: profit?.amount,
+                  profitLossPct: profit?.percent,
                   currency: norm.currency,
                   tradeTime: norm.tradeTime,
                   rawType: norm.rawType,
@@ -168,6 +173,30 @@ export class BrokerSyncService {
     return state !== null;
   }
 
+  private async positionSnapshot(userId: string, accountId: string): Promise<PositionSnapshotEntry[]> {
+    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } } });
+    return this.readPositionSnapshot(state?.value);
+  }
+
+  private estimateProfit(
+    trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; price?: number },
+    previous: PositionSnapshotEntry[],
+  ): { amount: number; percent: number } | null {
+    if (trade.side !== 'SELL' || trade.quantity === undefined || trade.price === undefined) return null;
+    const prior = previous.find((entry) => entry.symbol === trade.symbol);
+    if (!prior?.price) return null;
+    const multiplier = this.contractMultiplier(trade.symbol);
+    const proceeds = trade.price * multiplier * trade.quantity;
+    const cost = prior.price * trade.quantity;
+    if (!Number.isFinite(proceeds) || !Number.isFinite(cost) || cost <= 0) return null;
+    const amount = proceeds - cost;
+    return { amount, percent: (amount / cost) * 100 };
+  }
+
+  private contractMultiplier(symbol: string): number {
+    return /\s\d{6}[CP]\d{8}$/.test(symbol) ? 100 : 1;
+  }
+
   private async syncPositionDeltas(
     userId: string,
     dbAccountId: string,
@@ -203,6 +232,7 @@ export class BrokerSyncService {
               side: norm.side,
               quantity: norm.quantity,
               price: norm.price,
+              priceSource: norm.priceSource,
               currency: norm.currency,
               tradeTime: norm.tradeTime,
               rawType: norm.rawType,
@@ -246,6 +276,8 @@ export class BrokerSyncService {
         symbolId: 'symbolId' in entry && typeof entry.symbolId === 'string' ? entry.symbolId : undefined,
         quantity,
         price: 'price' in entry && typeof entry.price === 'number' ? entry.price : undefined,
+        marketPrice: 'marketPrice' in entry && typeof entry.marketPrice === 'number' ? entry.marketPrice : undefined,
+        openPnl: 'openPnl' in entry && typeof entry.openPnl === 'number' ? entry.openPnl : undefined,
         currency: 'currency' in entry && typeof entry.currency === 'string' ? entry.currency : undefined,
       }];
     });

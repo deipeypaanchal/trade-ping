@@ -7,6 +7,7 @@ export type NormalizedTrade = {
   side: 'BUY' | 'SELL';
   quantity?: number;
   price?: number;
+  priceSource?: 'EXECUTION' | 'POSITION_COST_BASIS';
   currency?: string;
   tradeTime: Date;
   rawType?: string;
@@ -20,6 +21,8 @@ export type PositionSnapshotEntry = {
   symbolId?: string;
   quantity: number;
   price?: number;
+  marketPrice?: number;
+  openPnl?: number;
   currency?: string;
 };
 
@@ -47,6 +50,7 @@ export class TradeDetectorService {
       side,
       quantity,
       price,
+      priceSource: price === undefined ? undefined : 'EXECUTION',
       currency: 'USD',
       tradeTime: new Date(timestamp),
       rawType,
@@ -61,13 +65,18 @@ export class TradeDetectorService {
     if (!symbol) return null;
     const quantity = this.positionQuantity(position);
     if (quantity === undefined || quantity < 0) return null;
-    const price = this.toNumber(position.average_purchase_price ?? position.cost_basis ?? position.price);
+    const costBasis = this.toNumber(position.average_purchase_price ?? position.cost_basis);
+    const marketPrice = this.toNumber(position.price);
+    const price = costBasis ?? marketPrice;
+    const openPnl = this.toNumber(position.open_pnl);
     const currency = typeof position.currency === 'string' ? position.currency : position.currency?.code ?? this.positionInstrumentCurrency(position) ?? position.symbol?.currency?.code;
     return {
       symbol: symbol.symbol.toUpperCase(),
       symbolId: symbol.id,
       quantity,
       price,
+      marketPrice,
+      openPnl,
       currency: currency ?? 'USD',
     };
   }
@@ -93,6 +102,8 @@ export class TradeDetectorService {
       symbol: source.symbol,
       side,
       quantity: Math.abs(currentQuantity - previousQuantity),
+      price: source.price,
+      priceSource: source.price === undefined ? undefined : 'POSITION_COST_BASIS',
       currency: current?.currency ?? previous?.currency ?? 'USD',
       tradeTime: now,
       rawType: 'position_delta',

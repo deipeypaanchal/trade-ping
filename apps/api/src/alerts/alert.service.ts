@@ -53,7 +53,7 @@ export class AlertService {
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(event.symbol)}`];
     if (level !== 'PRIVATE') {
-      const details = this.tradeDetails(event, level);
+      const details = this.tradeDetails(event);
       if (details) lines.push(details);
     }
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
@@ -63,18 +63,31 @@ export class AlertService {
     return lines.join('\n');
   }
 
-  private tradeDetails(event: any, level: PrivacyLevel): string | null {
+  private tradeDetails(event: any): string | null {
     const inferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
-    const value = !inferred && event.quantity && event.price ? this.formatCurrency(this.decimal(event.quantity).mul(this.decimal(event.price))) : null;
+    const value = event.quantity && event.price ? this.formatCurrency(this.tradeValue(event)) : null;
     const details = [
       quantity ? `Qty: ${quantity}` : null,
-      level === 'PUBLIC' && !inferred && price ? `Avg price: $${price}` : null,
-      value ? `Value: ${value}` : null,
-      inferred ? 'Fill price unavailable; inferred from position change.' : null,
+      price ? `${inferred ? 'Est. cost basis' : 'Avg price'}: $${price}${this.optionPriceSuffix(event)}` : null,
+      value ? `${inferred ? 'Est. value' : 'Value'}: ${value}` : null,
+      ...this.profitDetails(event, inferred),
+      inferred ? 'Inferred from position change; fill price unavailable.' : null,
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;
+  }
+
+  private profitDetails(event: any, inferred: boolean): string[] {
+    if (event.side !== 'SELL') return [];
+    if (event.profitLoss !== null && event.profitLoss !== undefined) {
+      const amount = this.decimal(event.profitLoss);
+      const pct = event.profitLossPct !== null && event.profitLossPct !== undefined ? this.decimal(event.profitLossPct) : null;
+      const label = amount.greaterThanOrEqualTo(0) ? 'Est. profit' : 'Est. loss';
+      const pctText = pct ? ` (${pct.greaterThanOrEqualTo(0) ? '+' : ''}${pct.toFixed(2)}%)` : '';
+      return [`${label}: ${this.formatSignedCurrency(amount)}${pctText}`];
+    }
+    return [inferred ? 'P/L unavailable; fill price missing.' : 'P/L unavailable; cost basis missing.'];
   }
 
   /** Decimal-safe formatter. Avoid Number() coercion that would lose precision on large values. */
@@ -93,6 +106,27 @@ export class AlertService {
 
   private formatCurrency(value: Decimal): string {
     return `$${value.toFixed(2)}`;
+  }
+
+  private formatSignedCurrency(value: Decimal): string {
+    const prefix = value.greaterThanOrEqualTo(0) ? '+' : '-';
+    return `${prefix}$${value.abs().toFixed(2)}`;
+  }
+
+  private tradeValue(event: any): Decimal {
+    return this.decimal(event.quantity).mul(this.decimal(event.price)).mul(this.valueMultiplier(event));
+  }
+
+  private valueMultiplier(event: any): number {
+    return event.priceSource === 'EXECUTION' && this.isOptionSymbol(String(event.symbol)) ? 100 : 1;
+  }
+
+  private optionPriceSuffix(event: any): string {
+    return event.priceSource === 'EXECUTION' && this.isOptionSymbol(String(event.symbol)) ? ' premium' : '';
+  }
+
+  private isOptionSymbol(symbol: string): boolean {
+    return /\s\d{6}[CP]\d{8}$/.test(symbol);
   }
 
   private decimal(value: unknown): Decimal {

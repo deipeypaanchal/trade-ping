@@ -137,6 +137,9 @@ model TradeEvent {
   side           TradeSide
   quantity       Decimal?
   price          Decimal?
+  priceSource    String?
+  profitLoss     Decimal?
+  profitLossPct  Decimal?
   currency       String?        @default("USD")
   tradeTime      DateTime
   rawType        String?

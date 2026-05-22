@@ -13,6 +13,9 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       side: 'BUY',
       quantity: new Decimal('10'),
       price: new Decimal('150.25'),
+      priceSource: 'EXECUTION',
+      profitLoss: null,
+      profitLossPct: null,
       tradeTime: new Date('2026-05-21T14:30:00Z'),
       alertStatus: 'PENDING',
       user: { displayName: '@trader', timeZone: 'America/New_York' },
@@ -73,8 +76,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Qty: 10');
+    expect(sentTexts[0]).toContain('Avg price: $150.25');
     expect(sentTexts[0]).toContain('Value: $1502.50');
-    expect(sentTexts[0]).not.toContain('Avg price:');
   });
 
   it('adds average price in public privacy mode', async () => {
@@ -87,17 +90,39 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Avg price: $150.25');
   });
 
-  it('does not present inferred position prices as execution value', async () => {
-    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED' });
+  it('labels inferred position prices as estimates', async () => {
+    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS' });
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('Fill price unavailable; inferred from position change.');
+    expect(sentTexts[0]).toContain('Est. cost basis: $150.25');
+    expect(sentTexts[0]).toContain('Est. value: $1502.50');
+    expect(sentTexts[0]).toContain('Inferred from position change; fill price unavailable.');
     expect(sentTexts[0]).not.toContain('Avg price:');
-    expect(sentTexts[0]).not.toContain('Value:');
+  });
+
+  it('shows realized profit for sells when cost basis was captured', async () => {
+    const event = makeEvent({ side: 'SELL', profitLoss: new Decimal('25.50'), profitLossPct: new Decimal('12.75') });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Est. profit: +$25.50 (+12.75%)');
+  });
+
+  it('shows option execution value using the contract multiplier', async () => {
+    const event = makeEvent({ symbol: 'SOXS  260522C00010000', quantity: new Decimal('1'), price: new Decimal('0.18'), priceSource: 'EXECUTION' });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Avg price: $0.18 premium');
+    expect(sentTexts[0]).toContain('Value: $18.00');
   });
 
   it('hides size details in private privacy mode', async () => {
