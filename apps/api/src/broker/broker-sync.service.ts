@@ -212,10 +212,20 @@ export class BrokerSyncService {
     const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId: dbAccountId, key: 'position_snapshot' } } });
     const previous = this.readPositionSnapshot(state?.value);
     const previousByKey = this.positionMap(previous);
+    const positionChangeHealth = this.positionChangeHealth(previousByKey, currentByKey);
 
     let created = 0, alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
+      if (positionChangeHealth === 'PARTIAL_DROP') {
+        await this.auditSuspiciousPositionDelta(userId, dbAccountId, previous, current, 'partial_drop');
+        return { created, alerted };
+      }
+      if (positionChangeHealth === 'REHYDRATION') {
+        await this.auditSuspiciousPositionDelta(userId, dbAccountId, previous, current, 'rehydration');
+        await this.writePositionSnapshot(userId, dbAccountId, current);
+        return { created, alerted };
+      }
       const keys = new Set([...previousByKey.keys(), ...currentByKey.keys()]);
       for (const key of keys) {
         const norm = this.detector.normalizePositionDelta(userId, providerAccountId, previousByKey.get(key), currentByKey.get(key));
@@ -257,6 +267,35 @@ export class BrokerSyncService {
 
     await this.writePositionSnapshot(userId, dbAccountId, current);
     return { created, alerted };
+  }
+
+  private positionChangeHealth(previousByKey: Map<string, PositionSnapshotEntry>, currentByKey: Map<string, PositionSnapshotEntry>): 'OK' | 'PARTIAL_DROP' | 'REHYDRATION' {
+    const previousCount = previousByKey.size;
+    const currentCount = currentByKey.size;
+    if (!previousCount) return 'OK';
+    const removedCount = [...previousByKey.keys()].filter((key) => !currentByKey.has(key)).length;
+    const addedCount = [...currentByKey.keys()].filter((key) => !previousByKey.has(key)).length;
+
+    if (previousCount >= 3 && removedCount >= Math.ceil(previousCount / 2)) return 'PARTIAL_DROP';
+    if (previousCount <= 1 && currentCount >= 3 && addedCount >= 3) return 'REHYDRATION';
+    return 'OK';
+  }
+
+  private async auditSuspiciousPositionDelta(userId: string, accountId: string, previous: PositionSnapshotEntry[], current: PositionSnapshotEntry[], reason: string) {
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'broker_sync_position_delta_suppressed',
+        metadata: {
+          reason,
+          accountId,
+          previousCount: previous.length,
+          currentCount: current.length,
+          previousSymbols: previous.map((entry) => entry.symbol).sort(),
+          currentSymbols: current.map((entry) => entry.symbol).sort(),
+        },
+      },
+    });
   }
 
   private positionMap(entries: PositionSnapshotEntry[]): Map<string, PositionSnapshotEntry> {
