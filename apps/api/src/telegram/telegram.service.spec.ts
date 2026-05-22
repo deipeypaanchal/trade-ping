@@ -74,6 +74,7 @@ describe('TelegramService', () => {
       'privacy',
       'trust',
       'diagnostics',
+      'groupstatus',
       'setup',
       'status',
       'sync',

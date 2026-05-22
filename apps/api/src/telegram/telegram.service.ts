@@ -95,6 +95,7 @@ export class TelegramService implements OnModuleInit {
       { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
       { command: 'trust', description: 'What is bot, user, and group level' },
       { command: 'diagnostics', description: 'Explain latest sync and broker freshness' },
+      { command: 'groupstatus', description: 'Show group setup and alert health' },
       { command: 'setup', description: 'Post group onboarding instructions' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'sync', description: 'Manual backup sync' },

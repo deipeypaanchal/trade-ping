@@ -89,6 +89,12 @@ export class TelegramController {
         await this.telegram.sendMessage(chatId, this.trustText());
       } else if (this.cmd(text, '/diagnostics')) {
         await this.telegram.sendMessage(chatId, await this.diagnosticsText(user.id, group?.id));
+      } else if (this.cmd(text, '/groupstatus')) {
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Run /groupstatus inside a TradePing group.');
+          return { ok: true };
+        }
+        await this.telegram.sendMessage(chatId, await this.groupStatusText(group.id));
       } else if (this.cmd(text, '/help') || this.cmd(text, '/start')) {
         await this.telegram.sendMessage(chatId, this.helpText(msg.chat.type), { replyMarkup: msg.chat.type === 'private' ? undefined : this.privateStartKeyboard() });
       }
@@ -175,6 +181,7 @@ export class TelegramController {
       '/privacy — public, normal, private, or off',
       '/trust — what data is bot, user, and group level',
       '/diagnostics — explain what TradePing sees right now',
+      '/groupstatus — group setup and alert health',
       '/setup — post the group onboarding guide again',
       '/status — your connection status',
       '/disconnect — remove your connections',
@@ -312,6 +319,56 @@ export class TelegramController {
       lines.push('Latest detected here: none yet.');
     }
     lines.push('If a broker is delayed, /sync cannot force data SnapTrade has not received yet.');
+    return lines.join('\n');
+  }
+
+  private async groupStatusText(groupId: string) {
+    const [members, latest, pendingAlerts, failedJobs] = await Promise.all([
+      this.prisma.groupMember.findMany({
+        where: { groupId },
+        select: {
+          privacyLevel: true,
+          alertsEnabled: true,
+          user: {
+            select: {
+              brokerConnections: {
+                where: { status: { not: 'DISCONNECTED' } },
+                select: { status: true, brokerageName: true, brokerageSlug: true },
+              },
+            },
+          },
+        },
+      }),
+      this.prisma.tradeEvent.findFirst({
+        where: { groupId },
+        orderBy: { tradeTime: 'desc' },
+        select: { symbol: true, side: true, tradeTime: true, alertStatus: true, backfillStatus: true },
+      }),
+      this.prisma.tradeEvent.count({ where: { groupId, alertStatus: 'PENDING' } }),
+      this.prisma.auditLog.count({ where: { action: 'job_failed', createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } } }),
+    ]);
+
+    const connectedMembers = members.filter((member) => member.user.brokerConnections.some((conn) => conn.status === 'ACTIVE')).length;
+    const alertsOn = members.filter((member) => member.alertsEnabled && member.privacyLevel !== 'OFF').length;
+    const brokerRefs = members.flatMap((member) => member.user.brokerConnections.map((conn) => ({
+      brokerageName: conn.brokerageName,
+      brokerageSlug: conn.brokerageSlug,
+    })));
+    const delayed = brokerRefs.some((broker) => brokerFreshnessNote(broker).includes('delayed'));
+    const lines = [
+      '<b>TradePing group status</b>',
+      `Known members: ${members.length}`,
+      `Connected members: ${connectedMembers}`,
+      `Members with alerts on: ${alertsOn}`,
+      `Pending alerts: ${pendingAlerts}`,
+      `Worker failures in last 24h: ${failedJobs}`,
+      delayed ? 'Freshness: at least one connected broker may be delayed up to 24h.' : 'Freshness: best-effort near-real-time when brokers report fresh data.',
+    ];
+    if (latest) {
+      lines.push(`Latest detected: ${latest.side} ${this.escape(latest.symbol)} at ${new Date(latest.tradeTime).toLocaleString('en-US', { timeZone: TIME.DEFAULT_TIMEZONE })}; ${latest.backfillStatus.toLowerCase()}, ${latest.alertStatus.toLowerCase()}.`);
+    } else {
+      lines.push('Latest detected: none yet.');
+    }
     return lines.join('\n');
   }
 
