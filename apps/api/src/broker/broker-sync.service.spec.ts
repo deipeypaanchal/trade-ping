@@ -60,7 +60,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn(),
       },
       tradeEvent: {
-        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(), alertStatus: 'SKIPPED' }),
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
       },
       auditLog: { create: jest.fn() },
     };
