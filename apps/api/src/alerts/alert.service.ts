@@ -3,8 +3,13 @@ import { AlertStatus, PrivacyLevel } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../config/prisma.service';
 import { ALERT, TIME } from '../config/constants';
-import { contractMultiplier, isOptionSymbol } from '../broker/asset-type';
+import { AssetType, contractMultiplier, isOptionSymbol } from '../broker/asset-type';
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
+import { RenderableTrade } from './alert.types';
+
+/** Inferred (position-delta) alerts age out faster: they're synthetic and a 2-day-old
+ *  "you bought N shares" message during a Telegram outage is confusing noise. */
+const INFERRED_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 
 @Injectable()
 export class AlertService {
@@ -22,10 +27,10 @@ export class AlertService {
    *    forever once it recovers.
    */
   async sendTradeAlert(tradeEventId: string): Promise<boolean> {
-    const event = await this.prisma.tradeEvent.findUniqueOrThrow({
+    const event = (await this.prisma.tradeEvent.findUniqueOrThrow({
       where: { id: tradeEventId },
       include: { user: true, group: true, account: { include: { connection: true } } },
-    });
+    })) as unknown as RenderableTrade;
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
@@ -55,11 +60,13 @@ export class AlertService {
     }
   }
 
-  private isAlertExpired(event: { alertAttempts: number | null; tradeTime: Date; createdAt: Date }): boolean {
+  private isAlertExpired(event: { alertAttempts: number | null; tradeTime: Date; createdAt: Date; rawStatus: string | null; rawType: string | null }): boolean {
     const attempts = event.alertAttempts ?? 0;
     if (attempts >= ALERT.MAX_ATTEMPTS) return true;
     const anchor = event.tradeTime ?? event.createdAt;
-    return Date.now() - anchor.getTime() > ALERT.MAX_AGE_MS;
+    const isInferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
+    const maxAge = isInferred ? INFERRED_MAX_AGE_MS : ALERT.MAX_AGE_MS;
+    return Date.now() - anchor.getTime() > maxAge;
   }
 
   private async mark(id: string, status: AlertStatus) {
@@ -80,7 +87,7 @@ export class AlertService {
     });
   }
 
-  private render(event: any, level: PrivacyLevel): string {
+  private render(event: RenderableTrade, level: PrivacyLevel): string {
     const emoji = event.side === 'BUY' ? '🟢' : '🔴';
     const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
@@ -98,7 +105,7 @@ export class AlertService {
   }
 
   /** Human-readable subject — prefers a clean options description over the raw OCC ticker. */
-  private headlineSubject(event: any): string {
+  private headlineSubject(event: RenderableTrade): string {
     if (this.assetType(event) !== 'OPTION') return event.symbol;
     const underlying = event.underlying || event.symbol;
     const type = event.optionType ? this.titleCase(event.optionType) : '';
@@ -107,7 +114,7 @@ export class AlertService {
     return `${underlying} ${strike}${type}${expiry}`.replace(/\s+/g, ' ').trim();
   }
 
-  private tradeDetails(event: any): string | null {
+  private tradeDetails(event: RenderableTrade): string | null {
     const inferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
@@ -127,7 +134,7 @@ export class AlertService {
     return details.length ? details.join('\n') : null;
   }
 
-  private profitDetails(event: any, inferred: boolean): string[] {
+  private profitDetails(event: RenderableTrade, inferred: boolean): string[] {
     if (event.side !== 'SELL') return [];
     if (event.profitLoss !== null && event.profitLoss !== undefined) {
       const amount = this.decimal(event.profitLoss);
@@ -162,16 +169,16 @@ export class AlertService {
     return `${prefix}$${value.abs().toFixed(2)}`;
   }
 
-  private tradeValue(event: any): Decimal {
+  private tradeValue(event: RenderableTrade): Decimal {
     return this.decimal(event.quantity).mul(this.decimal(event.price)).mul(this.valueMultiplier(event));
   }
 
-  private valueMultiplier(event: any): number {
+  private valueMultiplier(event: RenderableTrade): number {
     return event.priceSource === 'EXECUTION' ? contractMultiplier(this.assetType(event), String(event.symbol)) : 1;
   }
 
-  private assetType(event: any): 'OPTION' | 'EQUITY' | 'CRYPTO' | 'FOREX' | 'UNKNOWN' {
-    if (typeof event.assetType === 'string' && event.assetType) return event.assetType as any;
+  private assetType(event: RenderableTrade): AssetType {
+    if (typeof event.assetType === 'string' && event.assetType) return event.assetType as AssetType;
     return isOptionSymbol(String(event.symbol)) ? 'OPTION' : 'EQUITY';
   }
 

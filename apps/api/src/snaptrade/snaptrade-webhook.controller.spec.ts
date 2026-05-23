@@ -61,4 +61,27 @@ describe('SnaptradeWebhookController', () => {
     expect(queue.add).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
+
+  it('USER_DELETED: tolerates P2025 (already deleted) and returns ok', async () => {
+    const rawBody = `{"userId":"snap-user","eventTimestamp":"${new Date().toISOString()}","eventType":"USER_DELETED"}`;
+    const body = JSON.parse(rawBody);
+    const signature = crypto.hmacBase64('consumer-secret', rawBody);
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({ id: 'app-user' });
+    (prisma.user.delete as jest.Mock).mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 'P2025' }));
+
+    await expect(controller.webhook(body, signature, { rawBody } as Request & { rawBody?: string })).resolves.toEqual({ ok: true });
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('USER_DELETED: rethrows non-P2025 errors so SnapTrade retries', async () => {
+    const rawBody = `{"userId":"snap-user","eventTimestamp":"${new Date().toISOString()}","eventType":"USER_DELETED"}`;
+    const body = JSON.parse(rawBody);
+    const signature = crypto.hmacBase64('consumer-secret', rawBody);
+    (prisma.user.findUnique as jest.Mock).mockResolvedValue({ id: 'app-user' });
+    (prisma.user.delete as jest.Mock).mockRejectedValueOnce(Object.assign(new Error('FK violation'), { code: 'P2003' }));
+
+    await expect(
+      controller.webhook(body, signature, { rawBody } as Request & { rawBody?: string }),
+    ).rejects.toThrow(/FK violation/);
+  });
 });

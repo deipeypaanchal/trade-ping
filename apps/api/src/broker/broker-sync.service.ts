@@ -220,7 +220,7 @@ export class BrokerSyncService {
     // 100× to proceeds only, producing absurd PnL for options (e.g. a $300
     // realised gain rendered as $498 / +24,900%). Cost basis is also stored
     // per-share/per-contract; multiply it identically.
-    const multiplier = contractMultiplier(trade.assetType as any, trade.symbol);
+    const multiplier = contractMultiplier(trade.assetType as 'OPTION' | 'EQUITY' | 'CRYPTO' | 'FOREX' | 'UNKNOWN' | undefined, trade.symbol);
     const proceeds = trade.price * multiplier * trade.quantity;
     const cost = prior.price * multiplier * trade.quantity;
     if (!Number.isFinite(proceeds) || !Number.isFinite(cost) || cost <= 0) return null;

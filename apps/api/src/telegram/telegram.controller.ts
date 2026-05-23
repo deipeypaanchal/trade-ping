@@ -9,6 +9,7 @@ import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
 import { PrivacyService } from '../privacy/privacy.service';
 import { brokerFreshnessNote, brokerFreshnessSummary } from '../broker/broker-freshness';
+import { EncryptedSecretError } from '../security/errors';
 
 const VALID_PRIVACY = new Set(['PUBLIC', 'NORMAL', 'PRIVATE', 'OFF']);
 
@@ -83,8 +84,16 @@ export class TelegramController {
         await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued. TradePing also checks automatically in the background. Alerts appear when your broker reports fresh data; Fidelity/IBKR may be delayed up to 24h.');
       } else if (this.cmd(text, '/disconnect')) {
-        const count = await this.onboarding.disconnectAll(user.id);
-        await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
+        try {
+          const count = await this.onboarding.disconnectAll(user.id);
+          await this.telegram.sendMessage(chatId, count ? `Disconnected ${count} brokerage connection(s). No more alerts until you /connect again.` : 'You had no active brokerage connections.');
+        } catch (err) {
+          if (err instanceof EncryptedSecretError) {
+            await this.telegram.sendMessage(chatId, 'Your encrypted brokerage secret could not be read (likely a key rotation). Your alerts are paused. Please /connect again to relink.');
+          } else {
+            throw err;
+          }
+        }
       } else if (this.cmd(text, '/trust')) {
         await this.telegram.sendMessage(chatId, this.trustText());
       } else if (this.cmd(text, '/diagnostics')) {

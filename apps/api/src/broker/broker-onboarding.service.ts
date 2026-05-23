@@ -82,13 +82,15 @@ export class BrokerOnboardingService {
       try {
         secret = this.crypto.decrypt(user.encryptedUserSecret);
       } catch (err) {
-        // Can't talk to SnapTrade without the secret; still flip local state so
-        // the user is freed from broken connections. Surface in audit log.
+        // The user's secret is unreadable (key rotation, corrupted ciphertext).
+        // Flip local state, audit, and surface the failure to the caller so the
+        // Telegram handler can show "contact support" instead of the misleading
+        // "you had no active brokerage connections".
         if (!(err instanceof EncryptedSecretError)) throw err;
         this.logger.warn(`disconnectAll(${userId}): decrypt failed; flipping local state only`);
         await this.prisma.brokerConnection.updateMany({ where: { userId }, data: { status: 'DISCONNECTED', disconnectedAt: new Date() } });
         await this.audit(userId, 'brokerages_disconnected', { count: 0, decryptFailed: true });
-        return 0;
+        throw new EncryptedSecretError('Your encrypted brokerage secret could not be read. Reconnect via /connect, or contact support.', err);
       }
       const conns = await this.snap.listConnections(user.snaptradeUserId, secret);
       for (const c of conns) {

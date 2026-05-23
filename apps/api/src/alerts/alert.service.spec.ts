@@ -33,7 +33,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     };
   }
 
-  function makeService(opts: { sendImpl?: jest.Mock; member?: any } = {}) {
+  function makeService(opts: { sendImpl?: jest.Mock; member?: { alertsEnabled: boolean; privacyLevel: string } } = {}) {
     const sentTexts: string[] = [];
     const prisma = {
       tradeEvent: {
@@ -99,7 +99,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
   });
 
   it('labels inferred position prices as estimates', async () => {
-    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS' });
+    // Inferred (position-delta) alerts age out after 2h, so use a fresh tradeTime
+    // here — otherwise the renderer correctly drops the alert as stale.
+    const recent = new Date(Date.now() - 5 * 60_000);
+    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS', tradeTime: recent, createdAt: recent });
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
@@ -110,6 +113,18 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Est. value: $1502.50');
     expect(sentTexts[0]).toContain('Inferred from position change; fill price unavailable.');
     expect(sentTexts[0]).not.toContain('Avg fill:');
+  });
+
+  it('drops inferred alerts older than 2h (synthetic outage guard)', async () => {
+    const oldTime = new Date(Date.now() - 3 * 60 * 60_000);
+    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS', tradeTime: oldTime, createdAt: oldTime });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    const ok = await svc.sendTradeAlert('trade-1');
+    expect(ok).toBe(false);
+    expect(sendImpl).not.toHaveBeenCalled();
   });
 
   it('shows realized profit for sells when cost basis was captured', async () => {

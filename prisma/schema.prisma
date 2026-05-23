@@ -173,6 +173,8 @@ model TradeEvent {
 
   @@index([userId, tradeTime])
   @@index([alertStatus])
+  @@index([groupId, alertStatus])
+  @@index([groupId, tradeTime(sort: Desc)])
 }
 
 model Alert {

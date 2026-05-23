@@ -18,7 +18,9 @@ export default [
     },
     rules: {
       'no-empty': ['error', { allowEmptyCatch: true }],
-      '@typescript-eslint/no-explicit-any': 'off',
+      // We intentionally do NOT silence no-explicit-any. AlertService
+      // historically rendered untyped trade events; a typo there was invisible
+      // at compile time. Keep this strict so future regressions get flagged.
     },
   },
 ];

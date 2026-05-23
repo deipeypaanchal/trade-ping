@@ -73,7 +73,14 @@ export class SnaptradeWebhookController {
     const localUser = snapUserId ? await this.prisma.user.findUnique({ where: { snaptradeUserId: snapUserId }, select: { id: true } }) : null;
 
     if (body.eventType === 'USER_DELETED' && localUser) {
-      await this.prisma.user.delete({ where: { id: localUser.id } }).catch(() => undefined);
+      try {
+        await this.prisma.user.delete({ where: { id: localUser.id } });
+      } catch (err) {
+        // P2025 = "record not found" — already deleted, idempotent.
+        // Anything else (FK violation, DB outage) must rethrow so SnapTrade
+        // redelivers; swallowing here was hiding real lifecycle errors.
+        if ((err as { code?: string }).code !== 'P2025') throw err;
+      }
       return { ok: true };
     }
 
