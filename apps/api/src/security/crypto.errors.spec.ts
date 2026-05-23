@@ -14,7 +14,9 @@ describe('CryptoService', () => {
   it('throws EncryptedSecretError on a corrupted payload', () => {
     const svc = new CryptoService();
     const enc = svc.encrypt('hello');
-    const tampered = enc.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
+    const parts = enc.split('.');
+    parts[3] = `${parts[3][0] === 'A' ? 'B' : 'A'}${parts[3].slice(1)}`;
+    const tampered = parts.join('.');
     expect(() => svc.decrypt(tampered)).toThrow(EncryptedSecretError);
   });
 

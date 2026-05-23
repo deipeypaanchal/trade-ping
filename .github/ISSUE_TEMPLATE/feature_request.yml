@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest a user-facing improvement for TradePing.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user pain would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should TradePing do?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Telegram onboarding
+        - Alert formatting
+        - Privacy/trust
+        - Broker support
+        - Self-hosting
+        - Reliability/observability
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Product constraints
+      options:
+        - label: This does not require write/trading access.
+        - label: This does not rank users by performance or encourage copy trading.
+        - label: This can work with delayed broker data when a broker does not support real-time updates.

@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a product bug without sharing private tokens or brokerage details.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Do not include Telegram bot tokens, SnapTrade keys, broker credentials, database URLs, screenshots with secrets, or raw webhook bodies.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the user-visible behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Telegram onboarding
+        - Broker connection
+        - Trade alert
+        - Privacy setting
+        - Deployment/self-hosting
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: broker
+    attributes:
+      label: Broker, if relevant
+      description: Broker name only. Do not include account numbers or credentials.
+      placeholder: Robinhood, Fidelity, etc.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add bot to group
+        2. Run /connect
+        3. ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Redact secrets, usernames, account numbers, URLs with tokens, and raw webhook payloads.
+      render: shell

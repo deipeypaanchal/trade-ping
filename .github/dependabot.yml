@@ -1,0 +1,52 @@
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    versioning-strategy: increase-if-necessary
+    groups:
+      nest-runtime:
+        patterns:
+          - "@nestjs/*"
+      prisma:
+        patterns:
+          - "prisma"
+          - "@prisma/*"
+      test-tooling:
+        dependency-type: "development"
+        patterns:
+          - "jest"
+          - "ts-jest"
+          - "@types/jest"
+      lint-tooling:
+        dependency-type: "development"
+        patterns:
+          - "eslint"
+          - "@eslint/*"
+          - "typescript-eslint"
+      typescript-tooling:
+        dependency-type: "development"
+        patterns:
+          - "typescript"
+          - "@types/node"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"

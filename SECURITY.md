@@ -8,12 +8,44 @@ TradePing is pre-1.0. Security fixes are applied to `main`.
 
 Please do not open a public issue for vulnerabilities or leaked secrets.
 
-Contact the repository owner privately with:
+Use a private GitHub security advisory when possible:
+
+https://github.com/deipeypaanchal/trade-ping/security/advisories/new
+
+Include:
 
 - A short description.
 - Affected endpoint or file.
 - Reproduction steps.
 - Impact and any suggested fix.
+- Whether you accessed only your own account/test data.
+
+Expected response:
+
+- Acknowledgement within 72 hours.
+- Triage update within 7 days for valid reports.
+- Coordinated disclosure after a fix is available.
+
+## Bug Bounty
+
+TradePing does not currently run a paid bug bounty program. Good-faith security reports are welcome and will be credited when the reporter wants public credit.
+
+In scope:
+
+- Authentication or authorization bypass.
+- Secret exposure in code, logs, CI, or deployment config.
+- Unauthorized access to another user's TradePing connection state.
+- Telegram webhook spoofing, SnapTrade webhook replay, or job endpoint bypass.
+- Privacy leaks across Telegram groups or users.
+
+Out of scope:
+
+- Social engineering, phishing, spam, or denial-of-service testing.
+- Accessing accounts, trades, tokens, or personal data that you do not own.
+- Broker-side or SnapTrade-side issues that TradePing cannot control.
+- Reports that require write/trading access. TradePing must remain read-only.
+
+Safe harbor applies only to good-faith testing that avoids privacy harm, data destruction, persistence, service disruption, and trading activity.
 
 ## Sensitive Data
 
