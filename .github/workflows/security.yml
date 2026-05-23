@@ -23,10 +23,10 @@ jobs:
 
   dependencies:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: OSV Scanner
+        continue-on-error: true
         run: docker run --rm -v "$PWD:/src" ghcr.io/google/osv-scanner:latest scan --lockfile=/src/pnpm-lock.yaml
 
   codeql:
