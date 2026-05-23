@@ -7,6 +7,9 @@ import { SnapTradePosition } from '../snaptrade/snaptrade.types';
 import { SnaptradeService } from '../snaptrade/snaptrade.service';
 import { PositionSnapshotEntry, TradeDetectorService } from './trade-detector.service';
 import { AlertService } from '../alerts/alert.service';
+import { contractMultiplier } from './asset-type';
+import { shouldSuppressAlert } from './suppress-policy';
+import { scopeKeyToGroup } from './order-key';
 
 @Injectable()
 export class BrokerSyncService {
@@ -85,20 +88,30 @@ export class BrokerSyncService {
           const seenOrderHashes = new Set<string>();
           // First sync for an account establishes a baseline: every order returned is
           // pre-existing history, so suppress it all rather than flooding the group.
-          // After the baseline, only genuinely stale orders (older than the suppress
-          // window, e.g. a broker surfacing a backdated fill) are suppressed.
-          const isFirstSync = !(await this.hasSyncState(userId, dbAcct.id));
-          const staleCutoff = Date.now() - this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS') * 3600_000;
+          // After the baseline, suppression is delegated to the pure shouldSuppressAlert
+          // policy which also folds in the last successful sync time so an outage
+          // longer than the static window doesn't re-alert old fills.
+          const lastSuccessfulSyncAt = await this.lastSuccessfulSyncAt(userId, dbAcct.id);
+          const isFirstSync = lastSuccessfulSyncAt === null;
+          const backfillSuppressHours = this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS');
           for (const order of orders) {
             const norm = this.detector.normalizeOrder(userId, acct.id, order);
             if (!norm) continue;
             if (seenOrderHashes.has(norm.dedupeHash)) continue;
             seenOrderHashes.add(norm.dedupeHash);
             const profit = this.estimateProfit(norm, previousSnapshot);
-            const suppress = opts.suppressBackfill || isFirstSync || norm.tradeTime.getTime() < staleCutoff;
+            const decision = shouldSuppressAlert({
+              tradeTime: norm.tradeTime,
+              isFirstSync,
+              suppressBackfill: opts.suppressBackfill === true,
+              backfillSuppressHours,
+              lastSuccessfulSyncAt,
+            });
+            const suppress = decision.suppress;
             for (const member of user.memberships) {
+              const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
               const trade = await this.prisma.tradeEvent.upsert({
-                where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
+                where: { dedupeHash: dedupe },
                 update: {},
                 create: {
                   userId,
@@ -109,6 +122,15 @@ export class BrokerSyncService {
                   quantity: norm.quantity,
                   price: norm.price,
                   priceSource: norm.priceSource,
+                  averageFillPrice: norm.averageFillPrice,
+                  executionPrice: norm.executionPrice,
+                  limitPrice: norm.limitPrice,
+                  fees: norm.fees,
+                  assetType: norm.assetType,
+                  underlying: norm.underlying,
+                  optionExpiration: norm.optionExpiration ? new Date(norm.optionExpiration) : undefined,
+                  optionStrike: norm.optionStrike,
+                  optionType: norm.optionType,
                   profitLoss: profit?.amount,
                   profitLossPct: profit?.percent,
                   currency: norm.currency,
@@ -116,7 +138,7 @@ export class BrokerSyncService {
                   rawType: norm.rawType,
                   rawStatus: norm.rawStatus,
                   rawId: norm.rawId,
-                  dedupeHash: `${norm.dedupeHash}:${member.groupId}`,
+                  dedupeHash: dedupe,
                   backfillStatus: suppress ? 'BACKFILL' : 'NEW',
                   alertStatus: suppress ? 'SKIPPED' : 'PENDING',
                 },
@@ -173,28 +195,37 @@ export class BrokerSyncService {
     return state !== null;
   }
 
+  private async lastSuccessfulSyncAt(userId: string, accountId: string): Promise<Date | null> {
+    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
+    if (!state?.value || typeof state.value !== 'object' || Array.isArray(state.value)) return null;
+    const at = (state.value as { at?: unknown }).at;
+    if (typeof at !== 'string') return null;
+    const d = new Date(at);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
   private async positionSnapshot(userId: string, accountId: string): Promise<PositionSnapshotEntry[]> {
     const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } } });
     return this.readPositionSnapshot(state?.value);
   }
 
   private estimateProfit(
-    trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; price?: number },
+    trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; price?: number; assetType?: string },
     previous: PositionSnapshotEntry[],
   ): { amount: number; percent: number } | null {
     if (trade.side !== 'SELL' || trade.quantity === undefined || trade.price === undefined) return null;
     const prior = previous.find((entry) => entry.symbol === trade.symbol);
     if (!prior?.price) return null;
-    const multiplier = this.contractMultiplier(trade.symbol);
+    // Both sides must use the SAME contract multiplier. Earlier code applied
+    // 100× to proceeds only, producing absurd PnL for options (e.g. a $300
+    // realised gain rendered as $498 / +24,900%). Cost basis is also stored
+    // per-share/per-contract; multiply it identically.
+    const multiplier = contractMultiplier(trade.assetType as any, trade.symbol);
     const proceeds = trade.price * multiplier * trade.quantity;
-    const cost = prior.price * trade.quantity;
+    const cost = prior.price * multiplier * trade.quantity;
     if (!Number.isFinite(proceeds) || !Number.isFinite(cost) || cost <= 0) return null;
     const amount = proceeds - cost;
     return { amount, percent: (amount / cost) * 100 };
-  }
-
-  private contractMultiplier(symbol: string): number {
-    return /\s\d{6}[CP]\d{8}$/.test(symbol) ? 100 : 1;
   }
 
   private async syncPositionDeltas(
@@ -231,8 +262,9 @@ export class BrokerSyncService {
         const norm = this.detector.normalizePositionDelta(userId, providerAccountId, previousByKey.get(key), currentByKey.get(key));
         if (!norm) continue;
         for (const member of memberships) {
+          const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
           const trade = await this.prisma.tradeEvent.upsert({
-            where: { dedupeHash: `${norm.dedupeHash}:${member.groupId}` },
+            where: { dedupeHash: dedupe },
             update: {},
             create: {
               userId,
@@ -243,12 +275,14 @@ export class BrokerSyncService {
               quantity: norm.quantity,
               price: norm.price,
               priceSource: norm.priceSource,
+              assetType: norm.assetType,
+              underlying: norm.underlying,
               currency: norm.currency,
               tradeTime: norm.tradeTime,
               rawType: norm.rawType,
               rawStatus: norm.rawStatus,
               rawId: norm.rawId,
-              dedupeHash: `${norm.dedupeHash}:${member.groupId}`,
+              dedupeHash: dedupe,
               backfillStatus: 'NEW',
               alertStatus: 'PENDING',
             },

@@ -47,3 +47,20 @@ export const TIME = {
   /** Fallback timezone when User.timeZone is not set. */
   DEFAULT_TIMEZONE: 'UTC',
 } as const;
+
+export const ALERT = {
+  /** Stop retrying a PENDING trade alert after this many attempts. Prevents
+   *  Telegram-outage trades from cycling forever and replaying old fills. */
+  MAX_ATTEMPTS: 8,
+  /** Or after this much wall-clock time since the trade fired — whichever first. */
+  MAX_AGE_MS: 48 * 60 * 60 * 1000,
+} as const;
+
+export const AUTO_SYNC = {
+  /** On boot, only kick an immediate sync if the previous one was longer ago
+   *  than this. Avoids re-firing a sync on every container restart, which
+   *  is the #1 cause of "the bot spammed when we deployed". */
+  BOOT_SKIP_IF_RECENT_MS: 2 * 60 * 1000,
+  /** Delay before the boot sync so we don't race the rest of the app coming up. */
+  BOOT_INITIAL_DELAY_MS: 30 * 1000,
+} as const;

@@ -1,19 +1,37 @@
 import { Injectable } from '@nestjs/common';
-import { createHash } from 'crypto';
 import { SnapTradeOrder, SnapTradePosition } from '../snaptrade/snaptrade.types';
+import { computeOrderKey, computePositionDeltaKey } from './order-key';
+import { AssetType, inferAssetType } from './asset-type';
 
 export type NormalizedTrade = {
   symbol: string;
   side: 'BUY' | 'SELL';
   quantity?: number;
+  /** Per-share or per-contract price actually rendered to users. Picked from
+   *  the broker's most-authoritative field; never the limit price. Undefined
+   *  when no fill price is available — the renderer must label "price unavailable". */
   price?: number;
   priceSource?: 'EXECUTION' | 'POSITION_COST_BASIS';
+  /** Raw price components captured verbatim from the broker for forensics / future PnL. */
+  averageFillPrice?: number;
+  executionPrice?: number;
+  limitPrice?: number;
+  /** Fees + commissions on this single fill, when the broker surfaces them. */
+  fees?: number;
   currency?: string;
   tradeTime: Date;
   rawType?: string;
   rawStatus?: string;
   rawId?: string;
   dedupeHash: string;
+  /** Asset-class classification — drives multiplier and alert rendering. */
+  assetType: AssetType;
+  /** Underlying ticker for options (e.g. "AAPL" for "AAPL  250321C00150000"). */
+  underlying?: string;
+  /** ISO date string for option expiration; undefined for non-options. */
+  optionExpiration?: string;
+  optionStrike?: number;
+  optionType?: 'CALL' | 'PUT';
 };
 
 export type PositionSnapshotEntry = {
@@ -36,27 +54,55 @@ export class TradeDetectorService {
     if (!side) return null;
     const symbol = order.universal_symbol?.symbol ?? order.universal_symbol?.raw_symbol ?? order.option_symbol?.ticker ?? order.option_symbol?.symbol ?? order.symbol;
     if (!symbol) return null;
+
     const quantity = this.toNumber(order.filled_quantity ?? order.total_quantity ?? order.quantity);
-    const price = this.toNumber(order.average_fill_price ?? order.execution_price ?? order.price);
+    // Fill-price selection: prefer broker-confirmed fills. Never fall back to
+    // `order.price` for the canonical fill price — some brokers put the limit
+    // price there and we'd render an order ticket as if it were a fill.
+    const averageFillPrice = this.toNumber(order.average_fill_price);
+    const executionPrice = this.toNumber(order.execution_price);
+    const limitPrice = this.toNumber(order.limit_price ?? order.price);
+    const price = averageFillPrice ?? executionPrice;
+    const priceSource = price === undefined ? undefined : 'EXECUTION';
+
     const timestamp = order.time_executed ?? order.filled_date ?? order.execution_time ?? order.time_placed ?? order.trade_date ?? order.updated_date ?? order.time_updated ?? order.created_date ?? new Date().toISOString();
     const providerOrderId = order.brokerage_order_id ?? order.id;
-    const rawId = providerOrderId ?? `${symbol}-${side}-${timestamp}-${quantity ?? ''}-${price ?? ''}`;
+    const symbolUpper = String(symbol).toUpperCase();
+    // rawId is forensic only — keep it stable for grouping but do NOT use it
+    // for identity. Identity comes from computeOrderKey().
+    const rawId = providerOrderId ?? `${symbolUpper}-${side}-${timestamp}`;
     const rawType = String(order.order_type ?? order.type ?? 'order');
-    const hashInput = providerOrderId
-      ? JSON.stringify({ userId, accountId, providerOrderId })
-      : JSON.stringify({ userId, accountId, rawId, symbol, side, quantity, price, timestamp });
+
+    const option = order.option_symbol;
+    const assetType = inferAssetType({ hasOptionSymbol: !!option, symbol: symbolUpper });
+    const optionType = this.toOptionType(option?.option_type);
+    const optionStrike = this.toNumber(option?.strike_price);
+    const optionExpiration = option?.expiration_date && /^\d{4}-\d{2}-\d{2}/.test(option.expiration_date) ? option.expiration_date.slice(0, 10) : undefined;
+    const underlying = option?.underlying_symbol?.symbol ?? option?.underlying_symbol?.raw_symbol ?? option?.symbol;
+    const fees = this.toNumber(order.fees);
+    const currency = typeof order.currency === 'string' ? order.currency : order.currency?.code ?? 'USD';
+
     return {
-      symbol: String(symbol).toUpperCase(),
+      symbol: symbolUpper,
       side,
       quantity,
       price,
-      priceSource: price === undefined ? undefined : 'EXECUTION',
-      currency: 'USD',
+      priceSource,
+      averageFillPrice,
+      executionPrice,
+      limitPrice,
+      fees,
+      currency,
       tradeTime: new Date(timestamp),
       rawType,
       rawStatus: status,
       rawId,
-      dedupeHash: createHash('sha256').update(hashInput).digest('hex'),
+      dedupeHash: computeOrderKey({ userId, accountId, providerOrderId, symbol: symbolUpper, side, timestamp }),
+      assetType,
+      underlying: underlying ? String(underlying).toUpperCase() : undefined,
+      optionExpiration,
+      optionStrike,
+      optionType,
     };
   }
 
@@ -97,7 +143,6 @@ export class TradeDetectorService {
     const side = currentQuantity > previousQuantity ? 'BUY' : 'SELL';
     const symbolId = source.symbolId ?? source.symbol;
     const rawId = `position-delta:${accountId}:${symbolId}:${previousQuantity}->${currentQuantity}`;
-    const hashInput = JSON.stringify({ userId, accountId, rawId });
     return {
       symbol: source.symbol,
       side,
@@ -109,7 +154,8 @@ export class TradeDetectorService {
       rawType: 'position_delta',
       rawStatus: 'INFERRED',
       rawId,
-      dedupeHash: createHash('sha256').update(hashInput).digest('hex'),
+      dedupeHash: computePositionDeltaKey({ userId, accountId, symbolId, previousQuantity, currentQuantity }),
+      assetType: inferAssetType({ symbol: source.symbol }),
     };
   }
 
@@ -150,5 +196,13 @@ export class TradeDetectorService {
     if (v === null || v === undefined || v === '') return undefined;
     const n = Number(v);
     return Number.isFinite(n) ? n : undefined;
+  }
+
+  private toOptionType(raw: unknown): 'CALL' | 'PUT' | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const upper = raw.toUpperCase();
+    if (upper === 'CALL' || upper === 'C') return 'CALL';
+    if (upper === 'PUT' || upper === 'P') return 'PUT';
+    return undefined;
   }
 }

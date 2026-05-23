@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AlertStatus, PrivacyLevel } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../config/prisma.service';
-import { TIME } from '../config/constants';
+import { ALERT, TIME } from '../config/constants';
+import { contractMultiplier, isOptionSymbol } from '../broker/asset-type';
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 
 @Injectable()
@@ -15,7 +16,10 @@ export class AlertService {
    * surrounding sync (which may still have other accounts/members to process).
    *  - success -> mark SENT, return true
    *  - permanent failure (chat gone, bot removed/blocked: 4xx except 429) -> mark SKIPPED
-   *  - transient failure (5xx/429/network) -> leave PENDING so the next sync retries
+   *  - transient failure (5xx/429/network) -> bump attempts, stay PENDING for retry
+   *    UNTIL we hit ALERT.MAX_ATTEMPTS or the trade is older than ALERT.MAX_AGE_MS,
+   *    at which point we mark SKIPPED so a Telegram outage can't replay old fills
+   *    forever once it recovers.
    */
   async sendTradeAlert(tradeEventId: string): Promise<boolean> {
     const event = await this.prisma.tradeEvent.findUniqueOrThrow({
@@ -25,33 +29,63 @@ export class AlertService {
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
+
+    if (this.isAlertExpired(event)) {
+      this.logger.warn(`giving up on trade ${event.id} after ${event.alertAttempts ?? 0} attempt(s) / age cap`);
+      await this.markAndStampAttempt(event.id, 'SKIPPED');
+      return false;
+    }
+
     const text = this.render(event, member.privacyLevel);
     try {
       const sent = await this.telegram.sendMessage(event.group.telegramChatId, text);
       await this.prisma.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId, renderedText: text, messageId: sent.message_id ? String(sent.message_id) : undefined, sentAt: new Date() } });
-      await this.mark(event.id, 'SENT');
+      await this.markAndStampAttempt(event.id, 'SENT');
       return true;
     } catch (e) {
       const status = e instanceof TelegramApiError ? e.status : undefined;
       if (status && status >= 400 && status < 500 && status !== 429) {
         this.logger.warn(`permanent alert failure for trade ${event.id} (HTTP ${status}); marking SKIPPED`);
-        await this.mark(event.id, 'SKIPPED');
+        await this.markAndStampAttempt(event.id, 'SKIPPED');
         return false;
       }
       this.logger.warn(`transient alert failure for trade ${event.id}: ${(e as Error).message}; staying PENDING for retry`);
+      await this.stampAttempt(event.id);
       return false;
     }
+  }
+
+  private isAlertExpired(event: { alertAttempts: number | null; tradeTime: Date; createdAt: Date }): boolean {
+    const attempts = event.alertAttempts ?? 0;
+    if (attempts >= ALERT.MAX_ATTEMPTS) return true;
+    const anchor = event.tradeTime ?? event.createdAt;
+    return Date.now() - anchor.getTime() > ALERT.MAX_AGE_MS;
   }
 
   private async mark(id: string, status: AlertStatus) {
     await this.prisma.tradeEvent.update({ where: { id }, data: { alertStatus: status } });
   }
 
+  private async markAndStampAttempt(id: string, status: AlertStatus) {
+    await this.prisma.tradeEvent.update({
+      where: { id },
+      data: { alertStatus: status, alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
+    });
+  }
+
+  private async stampAttempt(id: string) {
+    await this.prisma.tradeEvent.update({
+      where: { id },
+      data: { alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
+    });
+  }
+
   private render(event: any, level: PrivacyLevel): string {
     const emoji = event.side === 'BUY' ? '🟢' : '🔴';
     const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
-    const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(event.symbol)}`];
+    const headline = this.headlineSubject(event);
+    const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(headline)}`];
     if (level !== 'PRIVATE') {
       const details = this.tradeDetails(event);
       if (details) lines.push(details);
@@ -63,15 +97,30 @@ export class AlertService {
     return lines.join('\n');
   }
 
+  /** Human-readable subject — prefers a clean options description over the raw OCC ticker. */
+  private headlineSubject(event: any): string {
+    if (this.assetType(event) !== 'OPTION') return event.symbol;
+    const underlying = event.underlying || event.symbol;
+    const type = event.optionType ? this.titleCase(event.optionType) : '';
+    const strike = event.optionStrike !== null && event.optionStrike !== undefined ? `$${this.formatDecimal(event.optionStrike, 2)} ` : '';
+    const expiry = event.optionExpiration ? ` exp ${this.formatExpiry(event.optionExpiration)}` : '';
+    return `${underlying} ${strike}${type}${expiry}`.replace(/\s+/g, ' ').trim();
+  }
+
   private tradeDetails(event: any): string | null {
     const inferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
     const value = event.quantity && event.price ? this.formatCurrency(this.tradeValue(event)) : null;
+    const isOption = this.assetType(event) === 'OPTION';
+    const qtyLabel = isOption ? 'Contracts' : 'Qty';
+    const priceLabel = inferred ? 'Est. cost basis' : 'Avg fill';
+    const valueLabel = inferred ? 'Est. value' : 'Notional';
+    const priceSuffix = isOption && event.priceSource === 'EXECUTION' ? ' premium' : '';
     const details = [
-      quantity ? `Qty: ${quantity}` : null,
-      price ? `${inferred ? 'Est. cost basis' : 'Avg price'}: $${price}${this.optionPriceSuffix(event)}` : null,
-      value ? `${inferred ? 'Est. value' : 'Value'}: ${value}` : null,
+      quantity ? `${qtyLabel}: ${quantity}` : null,
+      price ? `${priceLabel}: $${price}${priceSuffix}` : null,
+      value ? `${valueLabel}: ${value}` : null,
       ...this.profitDetails(event, inferred),
       inferred ? 'Inferred from position change; fill price unavailable.' : null,
     ].filter(Boolean);
@@ -118,15 +167,23 @@ export class AlertService {
   }
 
   private valueMultiplier(event: any): number {
-    return event.priceSource === 'EXECUTION' && this.isOptionSymbol(String(event.symbol)) ? 100 : 1;
+    return event.priceSource === 'EXECUTION' ? contractMultiplier(this.assetType(event), String(event.symbol)) : 1;
   }
 
-  private optionPriceSuffix(event: any): string {
-    return event.priceSource === 'EXECUTION' && this.isOptionSymbol(String(event.symbol)) ? ' premium' : '';
+  private assetType(event: any): 'OPTION' | 'EQUITY' | 'CRYPTO' | 'FOREX' | 'UNKNOWN' {
+    if (typeof event.assetType === 'string' && event.assetType) return event.assetType as any;
+    return isOptionSymbol(String(event.symbol)) ? 'OPTION' : 'EQUITY';
   }
 
-  private isOptionSymbol(symbol: string): boolean {
-    return /\s\d{6}[CP]\d{8}$/.test(symbol);
+  private titleCase(s: string): string {
+    return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  }
+
+  private formatExpiry(value: unknown): string {
+    const d = value instanceof Date ? value : new Date(String(value));
+    if (!Number.isFinite(d.getTime())) return String(value);
+    // "Mar 21, 2025" — unambiguous and short.
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
   }
 
   private decimal(value: unknown): Decimal {

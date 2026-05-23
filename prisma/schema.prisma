@@ -129,30 +129,47 @@ model SyncState {
 }
 
 model TradeEvent {
-  id             String         @id @default(cuid())
-  userId         String
-  groupId        String?
-  accountId      String?
-  symbol         String
-  side           TradeSide
-  quantity       Decimal?
-  price          Decimal?
-  priceSource    String?
-  profitLoss     Decimal?
-  profitLossPct  Decimal?
-  currency       String?        @default("USD")
-  tradeTime      DateTime
-  rawType        String?
-  rawStatus      String?
-  rawId          String?
-  dedupeHash     String         @unique
-  backfillStatus BackfillStatus @default(NEW)
-  alertStatus    AlertStatus    @default(PENDING)
-  createdAt      DateTime       @default(now())
-  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group          Group?         @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  account        BrokerAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  alerts         Alert[]
+  id                 String         @id @default(cuid())
+  userId             String
+  groupId            String?
+  accountId          String?
+  symbol             String
+  side               TradeSide
+  quantity           Decimal?
+  price              Decimal?
+  priceSource        String?
+  /// Verbatim price components from the broker for forensic audit and future PnL recomputation.
+  averageFillPrice   Decimal?
+  executionPrice     Decimal?
+  limitPrice         Decimal?
+  /// Per-fill commission + exchange fees when surfaced (most brokers expose via activities endpoint).
+  fees               Decimal?
+  /// Asset class: EQUITY | OPTION | CRYPTO | FOREX | UNKNOWN. Drives multiplier and rendering.
+  assetType          String?
+  /// Underlying ticker for options (e.g. "AAPL" for an AAPL call).
+  underlying         String?
+  optionExpiration   DateTime?
+  optionStrike       Decimal?
+  /// 'CALL' or 'PUT'.
+  optionType         String?
+  profitLoss         Decimal?
+  profitLossPct      Decimal?
+  currency           String?        @default("USD")
+  tradeTime          DateTime
+  rawType            String?
+  rawStatus          String?
+  rawId              String?
+  dedupeHash         String         @unique
+  backfillStatus     BackfillStatus @default(NEW)
+  alertStatus        AlertStatus    @default(PENDING)
+  /// Number of times we've attempted to deliver the alert. Capped by ALERT.MAX_ATTEMPTS.
+  alertAttempts      Int            @default(0)
+  lastAlertAttemptAt DateTime?
+  createdAt          DateTime       @default(now())
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group              Group?         @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  account            BrokerAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  alerts             Alert[]
 
   @@index([userId, tradeTime])
   @@index([alertStatus])

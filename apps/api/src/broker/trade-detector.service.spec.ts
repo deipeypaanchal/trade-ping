@@ -76,4 +76,72 @@ describe('TradeDetectorService', () => {
     expect(first?.rawStatus).toBe('INFERRED');
     expect(second?.dedupeHash).toBe(first?.dedupeHash);
   });
+
+  it('NEVER renders order.price (limit) as a fill price', () => {
+    // Some brokers expose order.price as the limit price even after execution.
+    // The detector must treat it as a limit, not as the fill we rendered to users.
+    const out = svc.normalizeOrder('u1', 'a1', {
+      brokerage_order_id: 'o1',
+      status: 'EXECUTED',
+      action: 'BUY',
+      universal_symbol: { symbol: 'AAPL' },
+      filled_quantity: 1,
+      price: 999.99, // limit
+    });
+    expect(out?.price).toBeUndefined(); // no fill available — renderer should say "price unavailable"
+    expect(out?.limitPrice).toBe(999.99);
+  });
+
+  it('prefers average_fill_price over execution_price', () => {
+    const out = svc.normalizeOrder('u1', 'a1', {
+      brokerage_order_id: 'o1',
+      status: 'EXECUTED',
+      action: 'BUY',
+      universal_symbol: { symbol: 'AAPL' },
+      filled_quantity: 1,
+      average_fill_price: 100.5,
+      execution_price: 101.0,
+    });
+    expect(out?.price).toBe(100.5);
+    expect(out?.averageFillPrice).toBe(100.5);
+    expect(out?.executionPrice).toBe(101.0);
+  });
+
+  it('extracts option metadata when option_symbol is present', () => {
+    const out = svc.normalizeOrder('u1', 'a1', {
+      brokerage_order_id: 'o-opt-1',
+      status: 'EXECUTED',
+      action: 'BUY',
+      filled_quantity: 1,
+      average_fill_price: 5.23,
+      option_symbol: {
+        ticker: 'AAPL  250321C00150000',
+        symbol: 'AAPL',
+        underlying_symbol: { symbol: 'AAPL' },
+        expiration_date: '2025-03-21',
+        strike_price: 150,
+        option_type: 'CALL',
+      },
+      filled_date: '2026-01-01T10:00:00Z',
+    });
+    expect(out?.assetType).toBe('OPTION');
+    expect(out?.symbol).toBe('AAPL  250321C00150000');
+    expect(out?.underlying).toBe('AAPL');
+    expect(out?.optionExpiration).toBe('2025-03-21');
+    expect(out?.optionStrike).toBe(150);
+    expect(out?.optionType).toBe('CALL');
+  });
+
+  it('classifies plain equities as EQUITY', () => {
+    const out = svc.normalizeOrder('u1', 'a1', {
+      brokerage_order_id: 'o1',
+      status: 'EXECUTED',
+      action: 'BUY',
+      universal_symbol: { symbol: 'AAPL' },
+      filled_quantity: 1,
+      average_fill_price: 100,
+    });
+    expect(out?.assetType).toBe('EQUITY');
+    expect(out?.underlying).toBeUndefined();
+  });
 });

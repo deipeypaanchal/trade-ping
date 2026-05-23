@@ -14,10 +14,18 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       quantity: new Decimal('10'),
       price: new Decimal('150.25'),
       priceSource: 'EXECUTION',
+      assetType: 'EQUITY',
+      underlying: null,
+      optionExpiration: null,
+      optionStrike: null,
+      optionType: null,
       profitLoss: null,
       profitLossPct: null,
       tradeTime: new Date('2026-05-21T14:30:00Z'),
+      createdAt: new Date('2026-05-21T14:30:00Z'),
       alertStatus: 'PENDING',
+      alertAttempts: 0,
+      lastAlertAttemptAt: null,
       user: { displayName: '@trader', timeZone: 'America/New_York' },
       group: { telegramChatId: '-100' },
       account: { connection: { brokerageName: 'Robinhood' } },
@@ -65,10 +73,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     expect(sentTexts[0]).toContain('Qty: 10');
     expect(sentTexts[0]).toContain('$123456789.99');
-    expect(sentTexts[0]).toContain('Value: $1234567899.87');
+    expect(sentTexts[0]).toContain('Notional: $1234567899.87');
   });
 
-  it('shows quantity and value in normal privacy mode', async () => {
+  it('shows quantity and notional in normal privacy mode', async () => {
     const event = makeEvent();
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
@@ -76,18 +84,18 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('Avg price: $150.25');
-    expect(sentTexts[0]).toContain('Value: $1502.50');
+    expect(sentTexts[0]).toContain('Avg fill: $150.25');
+    expect(sentTexts[0]).toContain('Notional: $1502.50');
   });
 
-  it('adds average price in public privacy mode', async () => {
+  it('adds average fill in public privacy mode', async () => {
     const event = makeEvent();
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Avg price: $150.25');
+    expect(sentTexts[0]).toContain('Avg fill: $150.25');
   });
 
   it('labels inferred position prices as estimates', async () => {
@@ -101,7 +109,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Est. cost basis: $150.25');
     expect(sentTexts[0]).toContain('Est. value: $1502.50');
     expect(sentTexts[0]).toContain('Inferred from position change; fill price unavailable.');
-    expect(sentTexts[0]).not.toContain('Avg price:');
+    expect(sentTexts[0]).not.toContain('Avg fill:');
   });
 
   it('shows realized profit for sells when cost basis was captured', async () => {
@@ -114,15 +122,38 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Est. profit: +$25.50 (+12.75%)');
   });
 
-  it('shows option execution value using the contract multiplier', async () => {
-    const event = makeEvent({ symbol: 'SOXS  260522C00010000', quantity: new Decimal('1'), price: new Decimal('0.18'), priceSource: 'EXECUTION' });
+  it('renders options with strike, type, expiry and contract-multiplier notional', async () => {
+    const event = makeEvent({
+      symbol: 'AAPL  250321C00150000',
+      assetType: 'OPTION',
+      underlying: 'AAPL',
+      optionStrike: new Decimal('150'),
+      optionType: 'CALL',
+      optionExpiration: new Date('2025-03-21T00:00:00Z'),
+      quantity: new Decimal('1'),
+      price: new Decimal('5.23'),
+      priceSource: 'EXECUTION',
+    });
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Avg price: $0.18 premium');
-    expect(sentTexts[0]).toContain('Value: $18.00');
+    expect(sentTexts[0]).toContain('AAPL $150.00 Call exp Mar 21, 2025');
+    expect(sentTexts[0]).toContain('Contracts: 1');
+    expect(sentTexts[0]).toContain('Avg fill: $5.23 premium');
+    expect(sentTexts[0]).toContain('Notional: $523.00');
+  });
+
+  it('legacy options without assetType still get 100x notional via symbol shape', async () => {
+    const event = makeEvent({ symbol: 'SOXS  260522C00010000', assetType: null, quantity: new Decimal('1'), price: new Decimal('0.18'), priceSource: 'EXECUTION' });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('Avg fill: $0.18 premium');
+    expect(sentTexts[0]).toContain('Notional: $18.00');
   });
 
   it('hides size details in private privacy mode', async () => {
@@ -134,7 +165,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     expect(sentTexts[0]).toContain('Anonymous member bought AAPL');
     expect(sentTexts[0]).not.toContain('Qty:');
-    expect(sentTexts[0]).not.toContain('Value:');
+    expect(sentTexts[0]).not.toContain('Notional:');
   });
 
   it("uses the user's timezone when set", async () => {
@@ -156,6 +187,37 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     const ok = await svc.sendTradeAlert('trade-1');
     expect(ok).toBe(false);
-    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
+    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'trade-1' },
+      data: expect.objectContaining({ alertStatus: 'SKIPPED' }),
+    }));
+  });
+
+  it('gives up and marks SKIPPED after MAX_ATTEMPTS retries (no infinite re-alert loop)', async () => {
+    const event = makeEvent({ alertAttempts: 8 }); // already at the cap
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    const ok = await svc.sendTradeAlert('trade-1');
+    expect(ok).toBe(false);
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ alertStatus: 'SKIPPED' }),
+    }));
+  });
+
+  it('gives up if the trade is older than MAX_AGE_MS regardless of attempts (outage replay guard)', async () => {
+    const event = makeEvent({
+      alertAttempts: 1,
+      tradeTime: new Date(Date.now() - 72 * 60 * 60 * 1000), // 3 days ago, beyond 48h cap
+    });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    const ok = await svc.sendTradeAlert('trade-1');
+    expect(ok).toBe(false);
+    expect(sendImpl).not.toHaveBeenCalled();
   });
 });

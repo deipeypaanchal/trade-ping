@@ -31,7 +31,16 @@ export type SnapTradeOrder = {
   time_in_force?: string;
   symbol?: string;
   universal_symbol?: { symbol?: string; raw_symbol?: string } | null;
-  option_symbol?: { ticker?: string; symbol?: string } | null;
+  option_symbol?: {
+    ticker?: string;
+    symbol?: string;
+    /** Underlying ticker for the option (e.g. "AAPL"). */
+    underlying_symbol?: { symbol?: string; raw_symbol?: string } | null;
+    /** ISO date string (e.g. "2025-03-21"). */
+    expiration_date?: string;
+    strike_price?: number | string;
+    option_type?: string; // 'CALL' | 'PUT' (case varies per broker)
+  } | null;
   total_quantity?: number | string;
   filled_quantity?: number | string;
   quantity?: number | string;
@@ -39,6 +48,9 @@ export type SnapTradeOrder = {
   average_fill_price?: number | string;
   execution_price?: number | string;
   limit_price?: number | string;
+  /** Fees/commissions, if surfaced on the order (most brokers expose via activities endpoint). */
+  fees?: number | string;
+  currency?: string | { code?: string };
   created_date?: string;
   updated_date?: string;
   filled_date?: string;
