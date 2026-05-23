@@ -16,7 +16,7 @@ You control your visibility with /privacy:
 public, normal, private, or off.
 
 Broker freshness varies. Some brokers are close to real time; Fidelity/IBKR can be delayed up to 24h.
-Price/value appears when SnapTrade reports it. Inferred position alerts label estimates clearly.
+TradePing posts only broker-reported execution/order records. Position-only changes are used for diagnostics, not group alerts.
 Use /trust to see what data is bot-level, user-level, and group-level.
 ```
 
@@ -51,7 +51,7 @@ Run this after each deploy:
 5. Confirm worker logs show automatic sync every configured interval.
 6. Place or verify a Robinhood trade if available.
 7. For Fidelity/IBKR, verify `/diagnostics` explains broker freshness instead of promising realtime.
-8. For option alerts, verify execution values use contract value while inferred alerts say estimated cost/value.
+8. For option alerts, verify execution values use contract value.
 
 ## Support Playbook
 

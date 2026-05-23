@@ -108,26 +108,16 @@ export class SnaptradeService {
     if (this.mock) {
       return [{ brokerage_order_id: 'mock-order-1', status: 'EXECUTED', action: 'BUY', universal_symbol: { symbol: 'AAPL' }, filled_quantity: 1, average_fill_price: 100, filled_date: new Date().toISOString() }];
     }
-    try {
-      const res = await this.sdk().accountInformation.getUserAccountOrders({ userId, userSecret, accountId, state: 'all', days });
-      return Array.isArray(res?.data) ? (res.data as SnapTradeOrder[]) : [];
-    } catch (err) {
-      this.logger.warn(`getUserAccountOrders failed for account ${accountId}: ${(err as Error).message}; continuing without historical orders`);
-      return [];
-    }
+    const res = await this.sdk().accountInformation.getUserAccountOrders({ userId, userSecret, accountId, state: 'all', days });
+    return Array.isArray(res?.data) ? (res.data as SnapTradeOrder[]) : [];
   }
 
   async listRecentAccountOrders(userId: string, userSecret: string, accountId: string): Promise<SnapTradeOrder[]> {
     if (this.mock) return [];
-    try {
-      const res = await this.sdk().accountInformation.getUserAccountRecentOrders({ userId, userSecret, accountId, onlyExecuted: false });
-      const data = res?.data as SnapTradeRecentOrders | SnapTradeOrder[] | undefined;
-      if (Array.isArray(data)) return data;
-      return Array.isArray(data?.orders) ? data.orders : [];
-    } catch (err) {
-      this.logger.warn(`getUserAccountRecentOrders failed for account ${accountId}: ${(err as Error).message}; continuing without recent orders`);
-      return [];
-    }
+    const res = await this.sdk().accountInformation.getUserAccountRecentOrders({ userId, userSecret, accountId, onlyExecuted: false });
+    const data = res?.data as SnapTradeRecentOrders | SnapTradeOrder[] | undefined;
+    if (Array.isArray(data)) return data;
+    return Array.isArray(data?.orders) ? data.orders : [];
   }
 
   async listAccountPositions(userId: string, userSecret: string, accountId: string): Promise<SnapTradePosition[]> {

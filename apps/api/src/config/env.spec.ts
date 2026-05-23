@@ -6,7 +6,7 @@ const baseEnv = {
   DATABASE_URL: 'postgresql://tradeping:tradeping@localhost:5432/tradeping?schema=public',
   REDIS_URL: 'redis://localhost:6379',
   TELEGRAM_BOT_TOKEN: '123456:token',
-  TELEGRAM_WEBHOOK_SECRET: 'telegram_secret_123456',
+  TELEGRAM_WEBHOOK_SECRET: 'test_webhook_secret_value',
   SNAPTRADE_CLIENT_ID: 'snap-client',
   SNAPTRADE_CONSUMER_KEY: 'snap-consumer',
   SNAPTRADE_REDIRECT_URI: 'https://tradeping.example/snaptrade/callback',

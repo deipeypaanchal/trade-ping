@@ -24,7 +24,7 @@ Telegram group alert
 - `SnaptradeService`: all SnapTrade REST calls, isolated for easy SDK replacement if needed.
 - `BrokerOnboardingService`: register SnapTrade user, create read-only portal, refresh/delete connections.
 - `BrokerSyncService`: sync connections/accounts/orders, dedupe, suppress backfill, create trade events.
-- `TradeDetectorService`: normalize executed buy/sell orders only.
+- `TradeDetectorService`: normalize executed buy/sell orders for alerts and position snapshots for diagnostics.
 - `AlertService`: render privacy-safe group messages.
 - `SnaptradeWebhookController`: verify SnapTrade webhooks and enqueue sync.
 - `WorkersModule`: BullMQ queue for sync jobs.

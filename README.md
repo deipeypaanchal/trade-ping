@@ -71,12 +71,12 @@ The service registers the Telegram webhook and command menu automatically on boo
 
 ## Privacy Levels
 
-- `PUBLIC`: name, ticker, side, quantity, average price, value, estimated sell P/L, and broker when available.
-- `NORMAL`: name, ticker, side, quantity, average price, value, estimated sell P/L, and broker when available.
+- `PUBLIC`: name, ticker, side, quantity, average fill, notional, estimated sell P/L, and broker when available.
+- `NORMAL`: name, ticker, side, quantity, notional, and broker when available.
 - `PRIVATE`: anonymous member, ticker, and side only.
 - `OFF`: no group alerts.
 
-When a broker does not expose an order but positions changed, TradePing can infer side and quantity. If SnapTrade exposes position cost basis, inferred alerts show estimated cost/value and clearly say the fill price is unavailable.
+TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics and are not posted to the group.
 
 ## Broker Freshness
 

@@ -75,7 +75,7 @@ Pre-review `TelegramService.sendMessage` had no limiter and no 429 handling. Wit
 
 Pre-review, `/sync` called `BrokerSyncService.syncUser(...)` inline. With one connection and three accounts, that is two SnapTrade roundtrips plus N order calls plus an alert send per trade — easily 5–15 seconds. Telegram considers webhook responses slow after ~5s and retries the update after 60s, which would cause duplicate processing (the bot is idempotent enough to survive this, but it still wastes calls and spawns extra alerts during retry).
 
-**Fix.** `/sync` now enqueues a `sync-user` BullMQ job with the user's id as the `jobId` (so a second `/sync` while one is in flight is a no-op), and immediately replies "Sync queued." in the chat.
+**Fix.** `/sync` now enqueues a deduped `sync-user` BullMQ job and immediately replies "Sync queued." in the chat.
 
 ### 2.2 Worker concurrency + rate limiter — `P1 FIXED`
 

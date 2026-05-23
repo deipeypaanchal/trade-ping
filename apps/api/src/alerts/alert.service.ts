@@ -7,10 +7,6 @@ import { AssetType, contractMultiplier, isOptionSymbol } from '../broker/asset-t
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 import { RenderableTrade } from './alert.types';
 
-/** Inferred (position-delta) alerts age out faster: they're synthetic and a 2-day-old
- *  "you bought N shares" message during a Telegram outage is confusing noise. */
-const INFERRED_MAX_AGE_MS = 2 * 60 * 60 * 1000;
-
 @Injectable()
 export class AlertService {
   private readonly logger = new Logger(AlertService.name);
@@ -34,6 +30,11 @@ export class AlertService {
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
+    if (this.isInferred(event)) {
+      this.logger.warn(`skipping inferred trade ${event.id}; group alerts require broker execution records`);
+      await this.mark(event.id, 'SKIPPED');
+      return false;
+    }
 
     if (this.isAlertExpired(event)) {
       this.logger.warn(`giving up on trade ${event.id} after ${event.alertAttempts ?? 0} attempt(s) / age cap`);
@@ -64,9 +65,11 @@ export class AlertService {
     const attempts = event.alertAttempts ?? 0;
     if (attempts >= ALERT.MAX_ATTEMPTS) return true;
     const anchor = event.tradeTime ?? event.createdAt;
-    const isInferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
-    const maxAge = isInferred ? INFERRED_MAX_AGE_MS : ALERT.MAX_AGE_MS;
-    return Date.now() - anchor.getTime() > maxAge;
+    return Date.now() - anchor.getTime() > ALERT.MAX_AGE_MS;
+  }
+
+  private isInferred(event: { rawStatus: string | null; rawType: string | null }): boolean {
+    return event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
   }
 
   private async mark(id: string, status: AlertStatus) {
@@ -94,7 +97,7 @@ export class AlertService {
     const headline = this.headlineSubject(event);
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(headline)}`];
     if (level !== 'PRIVATE') {
-      const details = this.tradeDetails(event);
+      const details = this.tradeDetails(event, level);
       if (details) lines.push(details);
     }
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
@@ -114,27 +117,23 @@ export class AlertService {
     return `${underlying} ${strike}${type}${expiry}`.replace(/\s+/g, ' ').trim();
   }
 
-  private tradeDetails(event: RenderableTrade): string | null {
-    const inferred = event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
+  private tradeDetails(event: RenderableTrade, level: PrivacyLevel): string | null {
     const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
     const value = event.quantity && event.price ? this.formatCurrency(this.tradeValue(event)) : null;
     const isOption = this.assetType(event) === 'OPTION';
     const qtyLabel = isOption ? 'Contracts' : 'Qty';
-    const priceLabel = inferred ? 'Est. cost basis' : 'Avg fill';
-    const valueLabel = inferred ? 'Est. value' : 'Notional';
     const priceSuffix = isOption && event.priceSource === 'EXECUTION' ? ' premium' : '';
     const details = [
       quantity ? `${qtyLabel}: ${quantity}` : null,
-      price ? `${priceLabel}: $${price}${priceSuffix}` : null,
-      value ? `${valueLabel}: ${value}` : null,
-      ...this.profitDetails(event, inferred),
-      inferred ? 'Inferred from position change; fill price unavailable.' : null,
+      level === 'PUBLIC' && price ? `Avg fill: $${price}${priceSuffix}` : null,
+      value ? `Notional: ${value}` : null,
+      ...(level === 'PUBLIC' ? this.profitDetails(event) : []),
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;
   }
 
-  private profitDetails(event: RenderableTrade, inferred: boolean): string[] {
+  private profitDetails(event: RenderableTrade): string[] {
     if (event.side !== 'SELL') return [];
     if (event.profitLoss !== null && event.profitLoss !== undefined) {
       const amount = this.decimal(event.profitLoss);
@@ -143,7 +142,7 @@ export class AlertService {
       const pctText = pct ? ` (${pct.greaterThanOrEqualTo(0) ? '+' : ''}${pct.toFixed(2)}%)` : '';
       return [`${label}: ${this.formatSignedCurrency(amount)}${pctText}`];
     }
-    return [inferred ? 'P/L unavailable; fill price missing.' : 'P/L unavailable; cost basis missing.'];
+    return ['P/L unavailable; cost basis missing.'];
   }
 
   /** Decimal-safe formatter. Avoid Number() coercion that would lose precision on large values. */

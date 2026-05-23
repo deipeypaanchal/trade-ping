@@ -12,19 +12,19 @@ describe('SnaptradeService order resilience', () => {
     return svc;
   }
 
-  it('continues when historical orders are unavailable', async () => {
+  it('surfaces historical order failures so sync watermarks are preserved', async () => {
     const svc = makeService({
       getUserAccountOrders: jest.fn().mockRejectedValue(new Error('broker endpoint unavailable')),
     });
 
-    await expect(svc.listAccountOrders('user', 'secret', 'account', 3)).resolves.toEqual([]);
+    await expect(svc.listAccountOrders('user', 'secret', 'account', 3)).rejects.toThrow('broker endpoint unavailable');
   });
 
-  it('continues when recent orders are unavailable', async () => {
+  it('surfaces recent order failures so sync watermarks are preserved', async () => {
     const svc = makeService({
       getUserAccountRecentOrders: jest.fn().mockRejectedValue(new Error('recent endpoint unavailable')),
     });
 
-    await expect(svc.listRecentAccountOrders('user', 'secret', 'account')).resolves.toEqual([]);
+    await expect(svc.listRecentAccountOrders('user', 'secret', 'account')).rejects.toThrow('recent endpoint unavailable');
   });
 });

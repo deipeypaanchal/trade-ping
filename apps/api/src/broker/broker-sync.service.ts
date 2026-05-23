@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../config/prisma.service';
 import { CryptoService } from '../security/crypto.service';
 import { EncryptedSecretError } from '../security/errors';
-import { SnapTradePosition } from '../snaptrade/snaptrade.types';
+import { SnapTradeOrder, SnapTradePosition } from '../snaptrade/snaptrade.types';
 import { SnaptradeService } from '../snaptrade/snaptrade.service';
 import { PositionSnapshotEntry, TradeDetectorService } from './trade-detector.service';
 import { AlertService } from '../alerts/alert.service';
@@ -81,10 +81,8 @@ export class BrokerSyncService {
             create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
           });
           const previousSnapshot = await this.positionSnapshot(userId, dbAcct.id);
-          const orders = [
-            ...(await this.snap.listRecentAccountOrders(user.snaptradeUserId, userSecret, acct.id)),
-            ...(await this.snap.listAccountOrders(user.snaptradeUserId, userSecret, acct.id, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'))),
-          ];
+          const orderFetch = await this.fetchOrders(user.snaptradeUserId, userSecret, acct.id);
+          const orders = orderFetch.orders;
           const seenOrderHashes = new Set<string>();
           // First sync for an account establishes a baseline: every order returned is
           // pre-existing history, so suppress it all rather than flooding the group.
@@ -94,61 +92,63 @@ export class BrokerSyncService {
           const lastSuccessfulSyncAt = await this.lastSuccessfulSyncAt(userId, dbAcct.id);
           const isFirstSync = lastSuccessfulSyncAt === null;
           const backfillSuppressHours = this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS');
-          for (const order of orders) {
-            const norm = this.detector.normalizeOrder(userId, acct.id, order);
-            if (!norm) continue;
-            if (seenOrderHashes.has(norm.dedupeHash)) continue;
-            seenOrderHashes.add(norm.dedupeHash);
-            const profit = this.estimateProfit(norm, previousSnapshot);
-            const decision = shouldSuppressAlert({
-              tradeTime: norm.tradeTime,
-              isFirstSync,
-              suppressBackfill: opts.suppressBackfill === true,
-              backfillSuppressHours,
-              lastSuccessfulSyncAt,
-            });
-            const suppress = decision.suppress;
-            for (const member of user.memberships) {
-              const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
-              const trade = await this.prisma.tradeEvent.upsert({
-                where: { dedupeHash: dedupe },
-                update: {},
-                create: {
-                  userId,
-                  groupId: member.groupId,
-                  accountId: dbAcct.id,
-                  symbol: norm.symbol,
-                  side: norm.side,
-                  quantity: norm.quantity,
-                  price: norm.price,
-                  priceSource: norm.priceSource,
-                  averageFillPrice: norm.averageFillPrice,
-                  executionPrice: norm.executionPrice,
-                  limitPrice: norm.limitPrice,
-                  fees: norm.fees,
-                  assetType: norm.assetType,
-                  underlying: norm.underlying,
-                  optionExpiration: norm.optionExpiration ? new Date(norm.optionExpiration) : undefined,
-                  optionStrike: norm.optionStrike,
-                  optionType: norm.optionType,
-                  profitLoss: profit?.amount,
-                  profitLossPct: profit?.percent,
-                  currency: norm.currency,
-                  tradeTime: norm.tradeTime,
-                  rawType: norm.rawType,
-                  rawStatus: norm.rawStatus,
-                  rawId: norm.rawId,
-                  dedupeHash: dedupe,
-                  backfillStatus: suppress ? 'BACKFILL' : 'NEW',
-                  alertStatus: suppress ? 'SKIPPED' : 'PENDING',
-                },
+          if (orderFetch.ok) {
+            for (const order of orders) {
+              const norm = this.detector.normalizeOrder(userId, acct.id, order);
+              if (!norm) continue;
+              if (seenOrderHashes.has(norm.dedupeHash)) continue;
+              seenOrderHashes.add(norm.dedupeHash);
+              const profit = this.estimateProfit(norm, previousSnapshot);
+              const decision = shouldSuppressAlert({
+                tradeTime: norm.tradeTime,
+                isFirstSync,
+                suppressBackfill: opts.suppressBackfill === true,
+                backfillSuppressHours,
+                lastSuccessfulSyncAt,
               });
-              if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
-              if (!suppress && trade.alertStatus === 'PENDING') {
-                try {
-                  if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
-                } catch (e) {
-                  this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+              const suppress = decision.suppress;
+              for (const member of user.memberships) {
+                const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
+                const trade = await this.prisma.tradeEvent.upsert({
+                  where: { dedupeHash: dedupe },
+                  update: {},
+                  create: {
+                    userId,
+                    groupId: member.groupId,
+                    accountId: dbAcct.id,
+                    symbol: norm.symbol,
+                    side: norm.side,
+                    quantity: norm.quantity,
+                    price: norm.price,
+                    priceSource: norm.priceSource,
+                    averageFillPrice: norm.averageFillPrice,
+                    executionPrice: norm.executionPrice,
+                    limitPrice: norm.limitPrice,
+                    fees: norm.fees,
+                    assetType: norm.assetType,
+                    underlying: norm.underlying,
+                    optionExpiration: norm.optionExpiration ? new Date(norm.optionExpiration) : undefined,
+                    optionStrike: norm.optionStrike,
+                    optionType: norm.optionType,
+                    profitLoss: profit?.amount,
+                    profitLossPct: profit?.percent,
+                    currency: norm.currency,
+                    tradeTime: norm.tradeTime,
+                    rawType: norm.rawType,
+                    rawStatus: norm.rawStatus,
+                    rawId: norm.rawId,
+                    dedupeHash: dedupe,
+                    backfillStatus: suppress ? 'BACKFILL' : 'NEW',
+                    alertStatus: suppress ? 'SKIPPED' : 'PENDING',
+                  },
+                });
+                if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
+                if (!suppress && trade.alertStatus === 'PENDING') {
+                  try {
+                    if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+                  } catch (e) {
+                    this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+                  }
                 }
               }
             }
@@ -162,7 +162,7 @@ export class BrokerSyncService {
             this.logger.warn(`syncUser(${userId}) account ${acct.id} positions failed: ${(err as Error).message}`);
             await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_positions_failed', metadata: { accountId: acct.id, message: (err as Error).message } } });
           }
-          await this.markSynced(userId, dbAcct.id);
+          if (orderFetch.ok) await this.markOrderSynced(userId, dbAcct.id);
         }
       } catch (err) {
         // Per-connection isolation: a single failing brokerage must not abort the
@@ -190,9 +190,20 @@ export class BrokerSyncService {
     }
   }
 
-  private async hasSyncState(userId: string, accountId: string): Promise<boolean> {
-    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
-    return state !== null;
+  private async fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ ok: boolean; orders: SnapTradeOrder[] }> {
+    try {
+      const orders = [
+        ...(await this.snap.listRecentAccountOrders(userId, userSecret, accountId)),
+        ...(await this.snap.listAccountOrders(userId, userSecret, accountId, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS'))),
+      ];
+      return { ok: true, orders };
+    } catch (err) {
+      this.logger.warn(`sync account ${accountId} order fetch failed: ${(err as Error).message}; preserving last successful order watermark`);
+      await this.prisma.auditLog.create({
+        data: { userId, action: 'broker_sync_orders_failed', metadata: { accountId, message: (err as Error).message } },
+      });
+      return { ok: false, orders: [] };
+    }
   }
 
   private async lastSuccessfulSyncAt(userId: string, accountId: string): Promise<Date | null> {
@@ -245,7 +256,8 @@ export class BrokerSyncService {
     const previousByKey = this.positionMap(previous);
     const positionChangeHealth = this.positionChangeHealth(previousByKey, currentByKey);
 
-    let created = 0, alerted = 0;
+    let created = 0;
+    const alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
       if (positionChangeHealth === 'PARTIAL_DROP') {
@@ -284,17 +296,10 @@ export class BrokerSyncService {
               rawId: norm.rawId,
               dedupeHash: dedupe,
               backfillStatus: 'NEW',
-              alertStatus: 'PENDING',
+              alertStatus: 'SKIPPED',
             },
           });
           if (trade.createdAt.getTime() >= startedAt) created += 1;
-          if (trade.alertStatus === 'PENDING') {
-            try {
-              if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
-            } catch (e) {
-              this.logger.warn(`alert send threw for position delta ${trade.id}: ${(e as Error).message}`);
-            }
-          }
         }
       }
     }
@@ -364,7 +369,7 @@ export class BrokerSyncService {
     });
   }
 
-  private async markSynced(userId: string, accountId: string) {
+  private async markOrderSynced(userId: string, accountId: string) {
     await this.prisma.syncState.upsert({
       where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } },
       update: { value: { at: new Date().toISOString() } },

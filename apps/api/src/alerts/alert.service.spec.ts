@@ -84,7 +84,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('Avg fill: $150.25');
+    expect(sentTexts[0]).not.toContain('Avg fill: $150.25');
     expect(sentTexts[0]).toContain('Notional: $1502.50');
   });
 
@@ -98,24 +98,21 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Avg fill: $150.25');
   });
 
-  it('labels inferred position prices as estimates', async () => {
-    // Inferred (position-delta) alerts age out after 2h, so use a fresh tradeTime
-    // here — otherwise the renderer correctly drops the alert as stale.
+  it('does not send inferred position-delta alerts', async () => {
     const recent = new Date(Date.now() - 5 * 60_000);
     const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS', tradeTime: recent, createdAt: recent });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
-    await svc.sendTradeAlert('trade-1');
+    const ok = await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('Est. cost basis: $150.25');
-    expect(sentTexts[0]).toContain('Est. value: $1502.50');
-    expect(sentTexts[0]).toContain('Inferred from position change; fill price unavailable.');
-    expect(sentTexts[0]).not.toContain('Avg fill:');
+    expect(ok).toBe(false);
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
   });
 
-  it('drops inferred alerts older than 2h (synthetic outage guard)', async () => {
+  it('skips stale inferred alerts without touching Telegram', async () => {
     const oldTime = new Date(Date.now() - 3 * 60 * 60_000);
     const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS', tradeTime: oldTime, createdAt: oldTime });
     const sendImpl = jest.fn();
@@ -129,7 +126,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
   it('shows realized profit for sells when cost basis was captured', async () => {
     const event = makeEvent({ side: 'SELL', profitLoss: new Decimal('25.50'), profitLossPct: new Decimal('12.75') });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
@@ -149,7 +146,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       price: new Decimal('5.23'),
       priceSource: 'EXECUTION',
     });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
@@ -162,7 +159,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
   it('legacy options without assetType still get 100x notional via symbol shape', async () => {
     const event = makeEvent({ symbol: 'SOXS  260522C00010000', assetType: null, quantity: new Decimal('1'), price: new Decimal('0.18'), priceSource: 'EXECUTION' });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');

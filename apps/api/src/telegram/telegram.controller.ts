@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
-import { JOB_DEFAULTS, TIME } from '../config/constants';
+import { JOB_DEFAULTS, SYNC, TIME } from '../config/constants';
 import { TelegramService } from './telegram.service';
 import { TelegramUpdate } from './telegram.types';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
@@ -81,7 +81,8 @@ export class TelegramController {
         const syncStates = connections.length ? await this.syncStatesFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, Date>();
         await this.telegram.sendMessage(chatId, this.statusText(connections, syncStates));
       } else if (this.cmd(text, '/sync')) {
-        await this.queue.add('sync-user', { userId: user.id }, { ...JOB_DEFAULTS });
+        const windowKey = Math.floor(Date.now() / SYNC.FANOUT_DEDUPE_WINDOW_MS);
+        await this.queue.add('sync-user', { userId: user.id }, { jobId: `manual-sync-user:${user.id}:${windowKey}`, ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued. TradePing also checks automatically in the background. Alerts appear when your broker reports fresh data; Fidelity/IBKR may be delayed up to 24h.');
       } else if (this.cmd(text, '/disconnect')) {
         try {

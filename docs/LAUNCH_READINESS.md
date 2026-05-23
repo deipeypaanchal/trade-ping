@@ -23,7 +23,7 @@ connected brokers, broker freshness, last sync check, and latest detected trade.
 - Liveness: `/livez` is available for a cheap process-only check.
 - Jobs: BullMQ queue in Redis, worker concurrency 2, job limiter 30 jobs/minute.
 - Sync: automatic `sync-all` every `SYNC_INTERVAL_MINUTES`, currently intended to be 1 minute for beta.
-- Data source: SnapTrade recent orders, historical orders, then position-delta fallback when orders are missing but holdings change. Inferred position alerts show quantity only and do not label position prices as execution fills.
+- Data source: SnapTrade recent orders and historical orders. Position deltas are recorded for diagnostics only and are not sent as group alerts.
 - Broker freshness: best-effort near-real-time where the broker supports it. Fidelity and IBKR can be delayed up to 24h, so the bot must not promise realtime alerts for every broker.
 - Telegram: per-chat and global Bottleneck rate limits plus 429 retry handling.
 
