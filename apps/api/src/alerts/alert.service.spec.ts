@@ -5,6 +5,7 @@ import { TelegramApiError, TelegramService } from '../telegram/telegram.service'
 
 describe('AlertService.render (via sendTradeAlert)', () => {
   function makeEvent(overrides: Record<string, unknown> = {}) {
+    const recent = new Date(Date.now() - 5 * 60_000);
     return {
       id: 'trade-1',
       userId: 'user-1',
@@ -21,8 +22,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       optionType: null,
       profitLoss: null,
       profitLossPct: null,
-      tradeTime: new Date('2026-05-21T14:30:00Z'),
-      createdAt: new Date('2026-05-21T14:30:00Z'),
+      tradeTime: recent,
+      createdAt: recent,
       alertStatus: 'PENDING',
       alertAttempts: 0,
       lastAlertAttemptAt: null,
@@ -181,14 +182,14 @@ describe('AlertService.render (via sendTradeAlert)', () => {
   });
 
   it("uses the user's timezone when set", async () => {
-    const event = makeEvent({ user: { displayName: 'x', timeZone: 'Europe/London' } });
+    const tradeTime = new Date(Date.now() - 5 * 60_000);
+    const event = makeEvent({ tradeTime, createdAt: tradeTime, user: { displayName: 'x', timeZone: 'Europe/London' } });
     const { svc, prisma, sentTexts } = makeService();
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
-    // 14:30 UTC = 15:30 BST in May
-    expect(sentTexts[0]).toMatch(/Time: .*3:30/);
+    expect(sentTexts[0]).toContain(`Time: ${tradeTime.toLocaleString('en-US', { timeZone: 'Europe/London' })}`);
   });
 
   it('marks SKIPPED on permanent 4xx telegram failure', async () => {

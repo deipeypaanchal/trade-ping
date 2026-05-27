@@ -72,6 +72,10 @@ export class TelegramController {
       } else if (this.cmd(text, '/setup') || this.cmd(text, '/guide')) {
         await this.telegram.sendMessage(chatId, this.groupSetupText(msg.chat.title), { replyMarkup: this.privateStartKeyboard() });
       } else if (this.cmd(text, '/status')) {
+        if (group) {
+          await this.telegram.sendMessage(chatId, await this.groupStatusText(group.id));
+          return { ok: true };
+        }
         await this.onboarding.refreshConnections(user.id);
         const connections = await this.prisma.brokerConnection.findMany({
           where: { userId: user.id, status: { not: 'DISCONNECTED' } },
@@ -193,7 +197,7 @@ export class TelegramController {
       '/diagnostics — explain what TradePing sees right now',
       '/groupstatus — group setup and alert health',
       '/setup — post the group onboarding guide again',
-      '/status — your connection status',
+      '/status — linked accounts and alert health for this group',
       '/disconnect — remove your connections',
       '',
       'Normal setup: tap Start private setup once, then run /connect here. After that, alerts are automatic.',
@@ -336,14 +340,25 @@ export class TelegramController {
     const [members, latest, pendingAlerts, failedJobs] = await Promise.all([
       this.prisma.groupMember.findMany({
         where: { groupId },
+        orderBy: { createdAt: 'asc' },
         select: {
           privacyLevel: true,
           alertsEnabled: true,
           user: {
             select: {
+              displayName: true,
               brokerConnections: {
                 where: { status: { not: 'DISCONNECTED' } },
-                select: { status: true, brokerageName: true, brokerageSlug: true },
+                orderBy: { updatedAt: 'desc' },
+                select: {
+                  status: true,
+                  brokerageName: true,
+                  brokerageSlug: true,
+                  accounts: {
+                    where: { status: { not: 'DISCONNECTED' } },
+                    select: { id: true, accountType: true },
+                  },
+                },
               },
             },
           },
@@ -364,6 +379,9 @@ export class TelegramController {
       brokerageName: conn.brokerageName,
       brokerageSlug: conn.brokerageSlug,
     })));
+    const syncStates = brokerRefs.length
+      ? await this.syncStatesFor(members.flatMap((member) => member.user.brokerConnections.flatMap((conn) => conn.accounts.map((account) => account.id))))
+      : new Map<string, Date>();
     const delayed = brokerRefs.some((broker) => brokerFreshnessNote(broker).includes('delayed'));
     const lines = [
       '<b>TradePing group status</b>',
@@ -379,6 +397,24 @@ export class TelegramController {
     } else {
       lines.push('Latest detected: none yet.');
     }
+    const roster = members.flatMap((member) => {
+      const owner = this.escape(member.user.displayName);
+      if (!member.user.brokerConnections.length) return [`${owner}: no brokerage connected.`];
+      return member.user.brokerConnections.map((conn) => {
+        const broker = this.escape(conn.brokerageName ?? conn.brokerageSlug ?? 'Brokerage');
+        const accountTypes = [...new Set(conn.accounts.flatMap((account) => {
+          const label = this.accountTypeLabel(account.accountType);
+          return label ? [label] : [];
+        }))];
+        const accounts = accountTypes.length ? `; accounts: ${accountTypes.join(', ')}` : '; accounts: connected';
+        const lastChecked = this.lastChecked(conn.accounts, syncStates);
+        const checked = lastChecked ? `; last checked ${this.relativeTime(lastChecked)}` : '';
+        const alertState = member.alertsEnabled && member.privacyLevel !== 'OFF' ? member.privacyLevel.toLowerCase() : 'off';
+        return `${owner}: ${broker} — ${conn.status.toLowerCase()}${accounts}; alerts ${alertState}${checked}.`;
+      });
+    });
+    lines.push('', '<b>Linked accounts in this group</b>', ...roster);
+    lines.push('Owner means the Telegram member who linked the read-only brokerage. Account names and numbers are not shown.');
     return lines.join('\n');
   }
 

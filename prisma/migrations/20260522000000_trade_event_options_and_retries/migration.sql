@@ -3,14 +3,14 @@
 -- preserved without backfill. assetType is left NULL for legacy rows; the
 -- renderer falls back to symbol-shape inference when assetType is absent.
 
-ALTER TABLE "TradeEvent" ADD COLUMN "averageFillPrice" DECIMAL(65,30);
-ALTER TABLE "TradeEvent" ADD COLUMN "executionPrice" DECIMAL(65,30);
-ALTER TABLE "TradeEvent" ADD COLUMN "limitPrice" DECIMAL(65,30);
-ALTER TABLE "TradeEvent" ADD COLUMN "fees" DECIMAL(65,30);
-ALTER TABLE "TradeEvent" ADD COLUMN "assetType" TEXT;
-ALTER TABLE "TradeEvent" ADD COLUMN "underlying" TEXT;
-ALTER TABLE "TradeEvent" ADD COLUMN "optionExpiration" TIMESTAMP(3);
-ALTER TABLE "TradeEvent" ADD COLUMN "optionStrike" DECIMAL(65,30);
-ALTER TABLE "TradeEvent" ADD COLUMN "optionType" TEXT;
-ALTER TABLE "TradeEvent" ADD COLUMN "alertAttempts" INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE "TradeEvent" ADD COLUMN "lastAlertAttemptAt" TIMESTAMP(3);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "averageFillPrice" DECIMAL(65,30);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "executionPrice" DECIMAL(65,30);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "limitPrice" DECIMAL(65,30);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "fees" DECIMAL(65,30);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "assetType" TEXT;
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "underlying" TEXT;
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "optionExpiration" TIMESTAMP(3);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "optionStrike" DECIMAL(65,30);
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "optionType" TEXT;
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "alertAttempts" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "TradeEvent" ADD COLUMN IF NOT EXISTS "lastAlertAttemptAt" TIMESTAMP(3);
