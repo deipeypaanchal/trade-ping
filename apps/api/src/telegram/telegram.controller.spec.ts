@@ -135,4 +135,81 @@ describe('TelegramController', () => {
     expect(text).toContain('skipped because inferred alerts are off');
     expect(text).toContain('holdings change');
   });
+
+  it('allows only Telegram admins to change inferred alerts', async () => {
+    const prisma = {
+      user: { upsert: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Deipey Paanchal' }) },
+      group: {
+        upsert: jest.fn().mockResolvedValue({ id: 'group-1' }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      groupMember: {
+        upsert: jest.fn().mockResolvedValue({}),
+      },
+      auditLog: { create: jest.fn() },
+    } as unknown as PrismaService;
+    const telegram = {
+      sendMessage: jest.fn().mockResolvedValue({ message_id: 1 }),
+      isChatAdmin: jest.fn().mockResolvedValue(false),
+    } as unknown as TelegramService;
+    const controller = new TelegramController(
+      prisma,
+      telegram,
+      {} as BrokerOnboardingService,
+      {} as PrivacyService,
+      new ConfigService({ TELEGRAM_WEBHOOK_SECRET: 'secret' }),
+      {} as Queue,
+    );
+
+    await controller.webhook({
+      message: {
+        message_id: 1,
+        chat: { id: -100, type: 'supergroup', title: 'High Risk High Rewards' },
+        from: { id: 123, first_name: 'Deipey' },
+        text: '/inferred on',
+      },
+    }, 'secret');
+
+    expect(telegram.isChatAdmin).toHaveBeenCalledWith('-100', '123');
+    expect(prisma.group.update).not.toHaveBeenCalled();
+    expect(telegram.sendMessage).toHaveBeenCalledWith('-100', expect.stringContaining('Only Telegram group admins'));
+  });
+
+  it('lets Telegram admins enable inferred alerts', async () => {
+    const prisma = {
+      user: { upsert: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Deipey Paanchal' }) },
+      group: {
+        upsert: jest.fn().mockResolvedValue({ id: 'group-1' }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      groupMember: {
+        upsert: jest.fn().mockResolvedValue({}),
+      },
+      auditLog: { create: jest.fn() },
+    } as unknown as PrismaService;
+    const telegram = {
+      sendMessage: jest.fn().mockResolvedValue({ message_id: 1 }),
+      isChatAdmin: jest.fn().mockResolvedValue(true),
+    } as unknown as TelegramService;
+    const controller = new TelegramController(
+      prisma,
+      telegram,
+      {} as BrokerOnboardingService,
+      {} as PrivacyService,
+      new ConfigService({ TELEGRAM_WEBHOOK_SECRET: 'secret' }),
+      {} as Queue,
+    );
+
+    await controller.webhook({
+      message: {
+        message_id: 1,
+        chat: { id: -100, type: 'supergroup', title: 'High Risk High Rewards' },
+        from: { id: 123, first_name: 'Deipey' },
+        text: '/inferred on',
+      },
+    }, 'secret');
+
+    expect(prisma.group.update).toHaveBeenCalledWith({ where: { id: 'group-1' }, data: { inferredAlertsEnabled: true } });
+    expect(telegram.sendMessage).toHaveBeenCalledWith('-100', expect.stringContaining('Inferred alerts are ON'));
+  });
 });

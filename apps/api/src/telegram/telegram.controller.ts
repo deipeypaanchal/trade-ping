@@ -93,7 +93,7 @@ export class TelegramController {
           await this.telegram.sendMessage(chatId, 'Run /inferred inside a TradePing group.');
           return { ok: true };
         }
-        await this.telegram.sendMessage(chatId, await this.inferredSettingsText(group.id, text));
+        await this.telegram.sendMessage(chatId, await this.inferredSettingsText(group.id, text, chatId, String(msg.from.id)));
       } else if (this.cmd(text, '/disconnect')) {
         try {
           const count = await this.onboarding.disconnectAll(user.id);
@@ -202,7 +202,7 @@ export class TelegramController {
       '/trust — what data is bot, user, and group level',
       '/diagnostics — explain what TradePing sees right now',
       '/groupstatus — group setup and alert health',
-      '/inferred — choose whether holdings-only changes can alert',
+      '/inferred — group admins can choose whether holdings-only changes can alert',
       '/setup — post the group onboarding guide again',
       '/status — linked accounts and alert health for this group',
       '/disconnect — remove your connections',
@@ -293,7 +293,7 @@ export class TelegramController {
       '',
       '<b>Group level</b>',
       'The Telegram group destination and which connected members can post alerts here.',
-      '/inferred controls whether this group can post clearly labeled holdings-only position changes when broker execution records are missing.',
+      '/inferred controls whether this group can post clearly labeled holdings-only position changes when broker execution records are missing. Only Telegram group admins can change it.',
       '',
       '<b>Per-user per-group level</b>',
       '/privacy controls only your alerts in this group. You can be public here, private elsewhere, or off in another group.',
@@ -357,9 +357,10 @@ export class TelegramController {
     return lines.join('\n');
   }
 
-  private async inferredSettingsText(groupId: string, text: string): Promise<string> {
+  private async inferredSettingsText(groupId: string, text: string, chatId: string, telegramUserId: string): Promise<string> {
     const value = text.split(/\s+/)[1]?.toLowerCase();
     if (value === 'on' || value === 'enable' || value === 'enabled') {
+      if (!(await this.canManageGroupSetting(chatId, telegramUserId))) return 'Only Telegram group admins can change inferred alerts. Current setting unchanged.';
       await this.prisma.group.update({ where: { id: groupId }, data: { inferredAlertsEnabled: true } });
       return [
         'Inferred alerts are ON for this group.',
@@ -368,6 +369,7 @@ export class TelegramController {
       ].join('\n');
     }
     if (value === 'off' || value === 'disable' || value === 'disabled') {
+      if (!(await this.canManageGroupSetting(chatId, telegramUserId))) return 'Only Telegram group admins can change inferred alerts. Current setting unchanged.';
       await this.prisma.group.update({ where: { id: groupId }, data: { inferredAlertsEnabled: false } });
       return [
         'Inferred alerts are OFF for this group.',
@@ -379,7 +381,22 @@ export class TelegramController {
       `Inferred alerts are currently ${group.inferredAlertsEnabled ? 'ON' : 'OFF'} for this group.`,
       '/inferred on  — allow clearly labeled holdings-only position-change alerts',
       '/inferred off — require broker execution records only',
+      'Only Telegram group admins can change this setting.',
     ].join('\n');
+  }
+
+  private async canManageGroupSetting(chatId: string, telegramUserId: string): Promise<boolean> {
+    try {
+      return await this.telegram.isChatAdmin(chatId, telegramUserId);
+    } catch (err) {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'telegram_admin_check_failed',
+          metadata: { chatId, message: (err as Error).message },
+        },
+      });
+      return false;
+    }
   }
 
   private async groupStatusText(groupId: string) {

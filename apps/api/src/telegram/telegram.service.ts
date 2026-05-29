@@ -14,6 +14,10 @@ export class TelegramApiError extends Error {
   }
 }
 
+export type TelegramChatMember = {
+  status?: 'creator' | 'administrator' | 'member' | 'restricted' | 'left' | 'kicked' | string;
+};
+
 /**
  * Telegram bot send-message wrapper with built-in rate limiting and 429 retries.
  *
@@ -76,6 +80,18 @@ export class TelegramService implements OnModuleInit {
     return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, options, 0));
   }
 
+  async isChatAdmin(chatId: string, userId: string): Promise<boolean> {
+    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    const url = new URL(`https://api.telegram.org/bot${token}/getChatMember`);
+    url.searchParams.set('chat_id', chatId);
+    url.searchParams.set('user_id', userId);
+    const res = await fetch(url);
+    const body = await res.text();
+    if (!res.ok) throw new TelegramApiError(`Telegram getChatMember failed: ${res.status} ${body}`, res.status);
+    const json = JSON.parse(body) as { result?: TelegramChatMember };
+    return json.result?.status === 'creator' || json.result?.status === 'administrator';
+  }
+
   async setWebhook(): Promise<void> {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const url = `${this.config.getOrThrow<string>('APP_BASE_URL')}/telegram/webhook`;
@@ -96,6 +112,7 @@ export class TelegramService implements OnModuleInit {
       { command: 'trust', description: 'What is bot, user, and group level' },
       { command: 'diagnostics', description: 'Explain latest sync and broker freshness' },
       { command: 'groupstatus', description: 'Show group setup and alert health' },
+      { command: 'inferred', description: 'Group setting for holdings-only alerts' },
       { command: 'setup', description: 'Post group onboarding instructions' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'sync', description: 'Manual backup sync' },
