@@ -81,14 +81,29 @@ export class TelegramService implements OnModuleInit {
   }
 
   async isChatAdmin(chatId: string, userId: string): Promise<boolean> {
+    return this.perChat.key(chatId).schedule(() => this.doIsChatAdmin(chatId, userId, 0));
+  }
+
+  private async doIsChatAdmin(chatId: string, userId: string, attempt: number): Promise<boolean> {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const url = new URL(`https://api.telegram.org/bot${token}/getChatMember`);
     url.searchParams.set('chat_id', chatId);
     url.searchParams.set('user_id', userId);
     const res = await fetch(url);
     const body = await res.text();
+    if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
+      const retryAfterSec = this.retryAfter(body);
+      this.logger.warn(`Telegram 429 for getChatMember in chat ${chatId}; retrying in ${retryAfterSec}s`);
+      await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
+      return this.doIsChatAdmin(chatId, userId, attempt + 1);
+    }
     if (!res.ok) throw new TelegramApiError(`Telegram getChatMember failed: ${res.status} ${body}`, res.status);
-    const json = JSON.parse(body) as { result?: TelegramChatMember };
+    let json: { result?: TelegramChatMember };
+    try {
+      json = JSON.parse(body) as { result?: TelegramChatMember };
+    } catch {
+      throw new TelegramApiError(`Telegram getChatMember returned malformed JSON: ${res.status} ${body}`, res.status);
+    }
     return json.result?.status === 'creator' || json.result?.status === 'administrator';
   }
 
@@ -140,8 +155,7 @@ export class TelegramService implements OnModuleInit {
     });
     const body = await res.text();
     if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
-      let retryAfterSec = 1;
-      try { retryAfterSec = (JSON.parse(body)?.parameters?.retry_after as number) || 1; } catch { /* ignore */ }
+      const retryAfterSec = this.retryAfter(body);
       this.logger.warn(`Telegram 429 for chat ${chatId}; retrying in ${retryAfterSec}s`);
       await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
       return this.doSend(chatId, text, options, attempt + 1);
@@ -149,5 +163,14 @@ export class TelegramService implements OnModuleInit {
     if (!res.ok) throw new TelegramApiError(`Telegram sendMessage failed: ${res.status} ${body}`, res.status);
     const json = JSON.parse(body) as { result?: { message_id: number } };
     return { message_id: json.result?.message_id };
+  }
+
+  private retryAfter(body: string): number {
+    try {
+      const retryAfter = (JSON.parse(body)?.parameters?.retry_after as number) || 1;
+      return Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : 1;
+    } catch {
+      return 1;
+    }
   }
 }
