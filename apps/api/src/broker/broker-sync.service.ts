@@ -29,6 +29,7 @@ export class BrokerSyncService {
       include: {
         memberships: {
           where: { group: { telegramChatId: { startsWith: '-' } } },
+          include: { group: { select: { inferredAlertsEnabled: true } } },
         },
       },
     });
@@ -243,7 +244,7 @@ export class BrokerSyncService {
     userId: string,
     dbAccountId: string,
     providerAccountId: string,
-    memberships: { groupId: string }[],
+    memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
     positions: SnapTradePosition[],
     suppressBackfill: boolean,
   ): Promise<{ created: number; alerted: number }> {
@@ -257,7 +258,7 @@ export class BrokerSyncService {
     const positionChangeHealth = this.positionChangeHealth(previousByKey, currentByKey);
 
     let created = 0;
-    const alerted = 0;
+    let alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
       if (positionChangeHealth === 'PARTIAL_DROP') {
@@ -275,6 +276,7 @@ export class BrokerSyncService {
         if (!norm) continue;
         for (const member of memberships) {
           const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
+          const sendInferred = member.group?.inferredAlertsEnabled === true;
           const trade = await this.prisma.tradeEvent.upsert({
             where: { dedupeHash: dedupe },
             update: {},
@@ -296,10 +298,17 @@ export class BrokerSyncService {
               rawId: norm.rawId,
               dedupeHash: dedupe,
               backfillStatus: 'NEW',
-              alertStatus: 'SKIPPED',
+              alertStatus: sendInferred ? 'PENDING' : 'SKIPPED',
             },
           });
           if (trade.createdAt.getTime() >= startedAt) created += 1;
+          if (sendInferred && trade.createdAt.getTime() >= startedAt && trade.alertStatus === 'PENDING') {
+            try {
+              if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+            } catch (e) {
+              this.logger.warn(`inferred alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+            }
+          }
         }
       }
     }

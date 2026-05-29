@@ -88,6 +88,12 @@ export class TelegramController {
         const windowKey = Math.floor(Date.now() / SYNC.FANOUT_DEDUPE_WINDOW_MS);
         await this.queue.add('sync-user', { userId: user.id }, { jobId: `manual-sync-user:${user.id}:${windowKey}`, ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued. TradePing also checks automatically in the background. Alerts appear when your broker reports fresh data; Fidelity/IBKR may be delayed up to 24h.');
+      } else if (this.cmd(text, '/inferred')) {
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Run /inferred inside a TradePing group.');
+          return { ok: true };
+        }
+        await this.telegram.sendMessage(chatId, await this.inferredSettingsText(group.id, text));
       } else if (this.cmd(text, '/disconnect')) {
         try {
           const count = await this.onboarding.disconnectAll(user.id);
@@ -196,6 +202,7 @@ export class TelegramController {
       '/trust — what data is bot, user, and group level',
       '/diagnostics — explain what TradePing sees right now',
       '/groupstatus — group setup and alert health',
+      '/inferred — choose whether holdings-only changes can alert',
       '/setup — post the group onboarding guide again',
       '/status — linked accounts and alert health for this group',
       '/disconnect — remove your connections',
@@ -268,6 +275,7 @@ export class TelegramController {
       '',
       'Each member connects their own read-only brokerage. This group only receives alerts for members who connected here.',
       'Alerts depend on broker freshness. Fidelity/IBKR may be delayed up to 24h.',
+      'If a broker shows positions before executions, /inferred can enable clearly labeled position-change alerts.',
       '',
       'Run /trust to see what is bot-level, user-level, and group-level.',
     ].join('\n');
@@ -285,6 +293,7 @@ export class TelegramController {
       '',
       '<b>Group level</b>',
       'The Telegram group destination and which connected members can post alerts here.',
+      '/inferred controls whether this group can post clearly labeled holdings-only position changes when broker execution records are missing.',
       '',
       '<b>Per-user per-group level</b>',
       '/privacy controls only your alerts in this group. You can be public here, private elsewhere, or off in another group.',
@@ -348,8 +357,34 @@ export class TelegramController {
     return lines.join('\n');
   }
 
+  private async inferredSettingsText(groupId: string, text: string): Promise<string> {
+    const value = text.split(/\s+/)[1]?.toLowerCase();
+    if (value === 'on' || value === 'enable' || value === 'enabled') {
+      await this.prisma.group.update({ where: { id: groupId }, data: { inferredAlertsEnabled: true } });
+      return [
+        'Inferred alerts are ON for this group.',
+        'When SnapTrade only reports a holdings change, TradePing may post a clearly labeled position-change alert instead of staying silent.',
+        'Use /inferred off anytime to require broker execution records only.',
+      ].join('\n');
+    }
+    if (value === 'off' || value === 'disable' || value === 'disabled') {
+      await this.prisma.group.update({ where: { id: groupId }, data: { inferredAlertsEnabled: false } });
+      return [
+        'Inferred alerts are OFF for this group.',
+        'TradePing will only post alerts when SnapTrade provides a broker execution record.',
+      ].join('\n');
+    }
+    const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId }, select: { inferredAlertsEnabled: true } });
+    return [
+      `Inferred alerts are currently ${group.inferredAlertsEnabled ? 'ON' : 'OFF'} for this group.`,
+      '/inferred on  — allow clearly labeled holdings-only position-change alerts',
+      '/inferred off — require broker execution records only',
+    ].join('\n');
+  }
+
   private async groupStatusText(groupId: string) {
-    const [members, latest, pendingAlerts, skippedInferred, failedJobs] = await Promise.all([
+    const [group, members, latest, pendingAlerts, skippedInferred, failedJobs] = await Promise.all([
+      this.prisma.group.findUniqueOrThrow({ where: { id: groupId }, select: { inferredAlertsEnabled: true } }),
       this.prisma.groupMember.findMany({
         where: { groupId },
         orderBy: { createdAt: 'asc' },
@@ -408,6 +443,7 @@ export class TelegramController {
       `Known members: ${members.length}`,
       `Connected members: ${connectedMembers}`,
       `Members with alerts on: ${alertsOn}`,
+      `Inferred alerts: ${group.inferredAlertsEnabled ? 'on' : 'off'}`,
       `Pending alerts: ${pendingAlerts}`,
       `Inferred trades skipped in last 24h: ${skippedInferred}`,
       `Worker failures in last 24h: ${failedJobs}`,
@@ -457,7 +493,7 @@ export class TelegramController {
     if (member && (!member.alertsEnabled || member.privacyLevel === 'OFF')) return 'Alert result: skipped because your alerts are off in this group.';
     if (trade.backfillStatus === 'BACKFILL') return 'Alert result: skipped as older broker history/backfill, so TradePing did not replay it into the group.';
     if (trade.rawType === 'position_delta' || trade.rawStatus === 'INFERRED') {
-      return 'Alert result: skipped because SnapTrade did not provide a broker execution record. TradePing saw only a holdings change, which can be stale or ambiguous.';
+      return 'Alert result: skipped because inferred alerts are off. TradePing saw only a holdings change, not a broker execution record.';
     }
     if (trade.alertStatus === 'SKIPPED') return 'Alert result: skipped by safety policy.';
     return `Alert result: ${trade.alertStatus.toLowerCase()}.`;

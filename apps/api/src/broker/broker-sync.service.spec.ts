@@ -94,6 +94,51 @@ describe('BrokerSyncService position-delta guards', () => {
     expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
+  it('sends position deltas when the group opts into inferred alerts', async () => {
+    const prisma = {
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({
+          value: {
+            positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
+          },
+        }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: {
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
+      },
+      auditLog: { create: jest.fn() },
+    };
+    const alerts = { sendTradeAlert: jest.fn().mockResolvedValue(true) };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      new TradeDetectorService(),
+      alerts as never,
+      null as never,
+    ) as unknown as {
+      syncPositionDeltas(
+        userId: string,
+        dbAccountId: string,
+        providerAccountId: string,
+        memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
+        positions: unknown[],
+        suppressBackfill: boolean,
+      ): Promise<{ created: number; alerted: number }>;
+    };
+
+    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false);
+
+    expect(result).toEqual({ created: 1, alerted: 1 });
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'PENDING' }),
+    }));
+    expect(alerts.sendTradeAlert).toHaveBeenCalledWith('trade-1');
+  });
+
   it('does not treat failed order fetches as successful syncs', async () => {
     const prisma = { auditLog: { create: jest.fn() } };
     const snap = {

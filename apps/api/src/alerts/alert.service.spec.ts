@@ -28,7 +28,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       alertAttempts: 0,
       lastAlertAttemptAt: null,
       user: { displayName: '@trader', timeZone: 'America/New_York' },
-      group: { telegramChatId: '-100' },
+      group: { telegramChatId: '-100', inferredAlertsEnabled: false },
       account: { connection: { brokerageName: 'Robinhood' } },
       ...overrides,
     };
@@ -111,6 +111,28 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(ok).toBe(false);
     expect(sendImpl).not.toHaveBeenCalled();
     expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
+  });
+
+  it('sends clearly labeled inferred alerts when the group opts in', async () => {
+    const recent = new Date(Date.now() - 5 * 60_000);
+    const event = makeEvent({
+      rawType: 'position_delta',
+      rawStatus: 'INFERRED',
+      priceSource: 'POSITION_COST_BASIS',
+      tradeTime: recent,
+      createdAt: recent,
+      group: { telegramChatId: '-100', inferredAlertsEnabled: true },
+    });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    const ok = await svc.sendTradeAlert('trade-1');
+
+    expect(ok).toBe(true);
+    expect(sentTexts[0]).toContain('Est. position price: $150.25');
+    expect(sentTexts[0]).toContain('Est. value: $1502.50');
+    expect(sentTexts[0]).toContain('Position-change alert; broker execution not provided yet.');
+    expect(sentTexts[0]).not.toContain('Avg fill');
   });
 
   it('skips stale inferred alerts without touching Telegram', async () => {

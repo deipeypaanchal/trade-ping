@@ -10,7 +10,10 @@ describe('TelegramController', () => {
   it('renders group /status with owner, broker, account type, and alert visibility', async () => {
     const prisma = {
       user: { upsert: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Deipey Paanchal' }) },
-      group: { upsert: jest.fn().mockResolvedValue({ id: 'group-1' }) },
+      group: {
+        upsert: jest.fn().mockResolvedValue({ id: 'group-1' }),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({ inferredAlertsEnabled: false }),
+      },
       groupMember: {
         upsert: jest.fn().mockResolvedValue({}),
         findMany: jest.fn().mockResolvedValue([
@@ -67,6 +70,7 @@ describe('TelegramController', () => {
     expect(text).toContain('Deipey Paanchal: Robinhood');
     expect(text).toContain('accounts: Individual');
     expect(text).toContain('alerts normal');
+    expect(text).toContain('Inferred alerts: off');
     expect(text).toContain('Owner means the Telegram member');
   });
 
@@ -128,7 +132,7 @@ describe('TelegramController', () => {
 
     const text = (telegram.sendMessage as jest.Mock).mock.calls[0][1] as string;
     expect(text).toContain('Latest detected here: SELL USDC via Robinhood');
-    expect(text).toContain('skipped because SnapTrade did not provide a broker execution record');
+    expect(text).toContain('skipped because inferred alerts are off');
     expect(text).toContain('holdings change');
   });
 });

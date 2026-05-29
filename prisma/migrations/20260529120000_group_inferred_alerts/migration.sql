@@ -1,0 +1,2 @@
+ALTER TABLE "Group"
+  ADD COLUMN IF NOT EXISTS "inferredAlertsEnabled" BOOLEAN NOT NULL DEFAULT false;

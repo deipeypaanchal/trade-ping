@@ -30,7 +30,7 @@ export class AlertService {
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
-    if (this.isInferred(event)) {
+    if (this.isInferred(event) && !event.group.inferredAlertsEnabled) {
       this.logger.warn(`skipping inferred trade ${event.id}; group alerts require broker execution records`);
       await this.mark(event.id, 'SKIPPED');
       return false;
@@ -95,11 +95,13 @@ export class AlertService {
     const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const headline = this.headlineSubject(event);
+    const inferred = this.isInferred(event);
     const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(headline)}`];
     if (level !== 'PRIVATE') {
       const details = this.tradeDetails(event, level);
       if (details) lines.push(details);
     }
+    if (inferred) lines.push('Position-change alert; broker execution not provided yet.');
     if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
     const tz = event.user?.timeZone || TIME.DEFAULT_TIMEZONE;
     lines.push(`Time: ${new Date(event.tradeTime).toLocaleString('en-US', { timeZone: tz })}`);
@@ -122,13 +124,16 @@ export class AlertService {
     const price = event.price ? this.formatDecimal(event.price, 2) : null;
     const value = event.quantity && event.price ? this.formatCurrency(this.tradeValue(event)) : null;
     const isOption = this.assetType(event) === 'OPTION';
+    const inferred = this.isInferred(event);
     const qtyLabel = isOption ? 'Contracts' : 'Qty';
     const priceSuffix = isOption && event.priceSource === 'EXECUTION' ? ' premium' : '';
+    const priceLabel = inferred ? 'Est. position price' : 'Avg fill';
+    const valueLabel = inferred ? 'Est. value' : 'Notional';
     const details = [
       quantity ? `${qtyLabel}: ${quantity}` : null,
-      level === 'PUBLIC' && price ? `Avg fill: $${price}${priceSuffix}` : null,
-      value ? `Notional: ${value}` : null,
-      ...(level === 'PUBLIC' ? this.profitDetails(event) : []),
+      level === 'PUBLIC' && price ? `${priceLabel}: $${price}${priceSuffix}` : null,
+      value ? `${valueLabel}: ${value}` : null,
+      ...(level === 'PUBLIC' && !inferred ? this.profitDetails(event) : []),
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;
   }

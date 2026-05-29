@@ -63,6 +63,7 @@ The service registers the Telegram webhook and command menu automatically on boo
 - `/trust` - explain what data is bot-level, user-level, group-level, and per-group.
 - `/diagnostics` - explain latest sync, broker freshness, latest detected trade, and why it did or did not alert.
 - `/groupstatus` - show group setup and alert health without exposing account names or numbers.
+- `/inferred on|off` - group-level setting for clearly labeled holdings-only position-change alerts.
 - `/setup` - repost group onboarding instructions.
 - `/status` - in private chat, show your connected brokers; in a group, show linked members, brokers, account types, freshness, and alert health.
 - `/sync` - manual backup check. This cannot force delayed broker data to appear.
@@ -76,7 +77,9 @@ The service registers the Telegram webhook and command menu automatically on boo
 - `PRIVATE`: anonymous member, ticker, and side only.
 - `OFF`: no group alerts.
 
-TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics and are not posted to the group because they can be stale or ambiguous.
+By default, TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics because they can be stale or ambiguous.
+
+Groups that prefer coverage over silence can run `/inferred on`. In that mode, holdings-only position changes may post as clearly labeled position-change alerts. These alerts say the broker execution was not provided yet and show estimated position price/value instead of an average fill.
 
 ## Broker Freshness
 
@@ -85,13 +88,14 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 - Robinhood and many brokers can appear close to real time when SnapTrade receives fresh data.
 - Fidelity and IBKR can be delayed up to 24 hours.
 - `/diagnostics` is the first support command when a user asks why an alert did not appear. It will distinguish between posted alerts, queued alerts, delayed broker data, historical backfill, and inferred holdings changes that were intentionally skipped.
-- `/status` in the group is the quickest group-level transparency check: it shows which Telegram member linked each broker, account type labels, privacy state, pending alerts, skipped inferred events in the last 24 hours, and worker failures.
+- `/status` in the group is the quickest group-level transparency check: it shows which Telegram member linked each broker, account type labels, privacy state, inferred-alert setting, pending alerts, skipped inferred events in the last 24 hours, and worker failures.
 
 ## Trust Model
 
 - **Bot level:** shared infrastructure and credentials: Telegram bot, SnapTrade API, hosting, Postgres, Redis, workers, and alert logic.
 - **User level:** Telegram identity, encrypted SnapTrade user secret, connected brokers/accounts, and detected trades/positions.
 - **Group level:** the Telegram group destination and the connected members in that group.
+- **Group inferred-alert setting:** `/inferred` controls whether the group accepts holdings-only alerts when broker execution records are missing.
 - **Per-user per-group level:** `/privacy` controls only one member's alerts in one group.
 
 ## Security Posture
