@@ -307,7 +307,18 @@ export class TelegramController {
     const latest = await this.prisma.tradeEvent.findFirst({
       where: { userId, ...(groupId ? { groupId } : {}) },
       orderBy: { tradeTime: 'desc' },
-      select: { symbol: true, side: true, tradeTime: true, alertStatus: true, backfillStatus: true, account: { select: { connection: { select: { brokerageName: true, brokerageSlug: true } } } } },
+      select: {
+        symbol: true,
+        side: true,
+        tradeTime: true,
+        createdAt: true,
+        alertStatus: true,
+        backfillStatus: true,
+        rawType: true,
+        rawStatus: true,
+        priceSource: true,
+        account: { select: { connection: { select: { brokerageName: true, brokerageSlug: true } } } },
+      },
     });
     const member = groupId ? await this.prisma.groupMember.findUnique({
       where: { userId_groupId: { userId, groupId } },
@@ -329,6 +340,7 @@ export class TelegramController {
     if (latest) {
       const broker = latest.account?.connection?.brokerageName ?? latest.account?.connection?.brokerageSlug ?? 'broker';
       lines.push(`Latest detected here: ${latest.side} ${this.escape(latest.symbol)} via ${this.escape(broker)} at ${new Date(latest.tradeTime).toLocaleString('en-US', { timeZone: TIME.DEFAULT_TIMEZONE })}; ${latest.backfillStatus.toLowerCase()}, ${latest.alertStatus.toLowerCase()}.`);
+      lines.push(this.alertExplanation(latest, member));
     } else {
       lines.push('Latest detected here: none yet.');
     }
@@ -337,7 +349,7 @@ export class TelegramController {
   }
 
   private async groupStatusText(groupId: string) {
-    const [members, latest, pendingAlerts, failedJobs] = await Promise.all([
+    const [members, latest, pendingAlerts, skippedInferred, failedJobs] = await Promise.all([
       this.prisma.groupMember.findMany({
         where: { groupId },
         orderBy: { createdAt: 'asc' },
@@ -367,9 +379,17 @@ export class TelegramController {
       this.prisma.tradeEvent.findFirst({
         where: { groupId },
         orderBy: { tradeTime: 'desc' },
-        select: { symbol: true, side: true, tradeTime: true, alertStatus: true, backfillStatus: true },
+        select: { symbol: true, side: true, tradeTime: true, createdAt: true, alertStatus: true, backfillStatus: true, rawType: true, rawStatus: true, priceSource: true },
       }),
       this.prisma.tradeEvent.count({ where: { groupId, alertStatus: 'PENDING' } }),
+      this.prisma.tradeEvent.count({
+        where: {
+          groupId,
+          alertStatus: 'SKIPPED',
+          createdAt: { gte: new Date(Date.now() - 24 * 3600_000) },
+          OR: [{ rawType: 'position_delta' }, { rawStatus: 'INFERRED' }],
+        },
+      }),
       this.prisma.auditLog.count({ where: { action: 'job_failed', createdAt: { gte: new Date(Date.now() - 24 * 3600_000) } } }),
     ]);
 
@@ -389,11 +409,13 @@ export class TelegramController {
       `Connected members: ${connectedMembers}`,
       `Members with alerts on: ${alertsOn}`,
       `Pending alerts: ${pendingAlerts}`,
+      `Inferred trades skipped in last 24h: ${skippedInferred}`,
       `Worker failures in last 24h: ${failedJobs}`,
       delayed ? 'Freshness: at least one connected broker may be delayed up to 24h.' : 'Freshness: best-effort near-real-time when brokers report fresh data.',
     ];
     if (latest) {
       lines.push(`Latest detected: ${latest.side} ${this.escape(latest.symbol)} at ${new Date(latest.tradeTime).toLocaleString('en-US', { timeZone: TIME.DEFAULT_TIMEZONE })}; ${latest.backfillStatus.toLowerCase()}, ${latest.alertStatus.toLowerCase()}.`);
+      lines.push(this.alertExplanation(latest, null));
     } else {
       lines.push('Latest detected: none yet.');
     }
@@ -416,6 +438,29 @@ export class TelegramController {
     lines.push('', '<b>Linked accounts in this group</b>', ...roster);
     lines.push('Owner means the Telegram member who linked the read-only brokerage. Account names and numbers are not shown.');
     return lines.join('\n');
+  }
+
+  private alertExplanation(
+    trade: {
+      alertStatus: string;
+      backfillStatus: string;
+      rawType: string | null;
+      rawStatus: string | null;
+      priceSource: string | null;
+      createdAt: Date;
+    },
+    member: { privacyLevel: string; alertsEnabled: boolean } | null,
+  ): string {
+    if (trade.alertStatus === 'SENT') return 'Alert result: posted to the group.';
+    if (trade.alertStatus === 'PENDING') return 'Alert result: queued for delivery.';
+    if (trade.alertStatus === 'FAILED') return 'Alert result: delivery failed and will retry if still inside the retry window.';
+    if (member && (!member.alertsEnabled || member.privacyLevel === 'OFF')) return 'Alert result: skipped because your alerts are off in this group.';
+    if (trade.backfillStatus === 'BACKFILL') return 'Alert result: skipped as older broker history/backfill, so TradePing did not replay it into the group.';
+    if (trade.rawType === 'position_delta' || trade.rawStatus === 'INFERRED') {
+      return 'Alert result: skipped because SnapTrade did not provide a broker execution record. TradePing saw only a holdings change, which can be stale or ambiguous.';
+    }
+    if (trade.alertStatus === 'SKIPPED') return 'Alert result: skipped by safety policy.';
+    return `Alert result: ${trade.alertStatus.toLowerCase()}.`;
   }
 
   private async syncStatesFor(accountIds: string[]): Promise<Map<string, Date>> {

@@ -12,7 +12,7 @@ Alerts are best-effort near-real-time where broker data supports it. Fidelity an
 - Read-only alerts with ticker, side, quantity, price/value when available, estimated sell P/L when cost basis is available, broker, and a not-financial-advice reminder.
 - Per-user, per-group privacy: public, normal, private, or off.
 - `/trust` to explain bot-level, user-level, group-level, and per-group data.
-- `/diagnostics` and `/groupstatus` for support when a trade does not appear.
+- `/diagnostics`, `/status`, and `/groupstatus` for support when a trade does not appear.
 
 ## Stack
 
@@ -61,10 +61,10 @@ The service registers the Telegram webhook and command menu automatically on boo
 - `/connect` - connect a read-only brokerage.
 - `/privacy public|normal|private|off` - choose how your alerts appear in this group.
 - `/trust` - explain what data is bot-level, user-level, group-level, and per-group.
-- `/diagnostics` - explain latest sync, broker freshness, and what TradePing sees for you.
-- `/groupstatus` - show group setup and alert health without exposing private broker details.
+- `/diagnostics` - explain latest sync, broker freshness, latest detected trade, and why it did or did not alert.
+- `/groupstatus` - show group setup and alert health without exposing account names or numbers.
 - `/setup` - repost group onboarding instructions.
-- `/status` - show your connected brokers, account types, freshness, and last check.
+- `/status` - in private chat, show your connected brokers; in a group, show linked members, brokers, account types, freshness, and alert health.
 - `/sync` - manual backup check. This cannot force delayed broker data to appear.
 - `/disconnect` - revoke brokerage connections.
 - `/help` - command list.
@@ -76,7 +76,7 @@ The service registers the Telegram webhook and command menu automatically on boo
 - `PRIVATE`: anonymous member, ticker, and side only.
 - `OFF`: no group alerts.
 
-TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics and are not posted to the group.
+TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics and are not posted to the group because they can be stale or ambiguous.
 
 ## Broker Freshness
 
@@ -84,7 +84,8 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 
 - Robinhood and many brokers can appear close to real time when SnapTrade receives fresh data.
 - Fidelity and IBKR can be delayed up to 24 hours.
-- `/diagnostics` is the first support command when a user asks why an alert did not appear.
+- `/diagnostics` is the first support command when a user asks why an alert did not appear. It will distinguish between posted alerts, queued alerts, delayed broker data, historical backfill, and inferred holdings changes that were intentionally skipped.
+- `/status` in the group is the quickest group-level transparency check: it shows which Telegram member linked each broker, account type labels, privacy state, pending alerts, skipped inferred events in the last 24 hours, and worker failures.
 
 ## Trust Model
 
