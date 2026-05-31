@@ -71,9 +71,9 @@ The service registers the Telegram webhook and command menu automatically on boo
 
 ## Privacy Levels
 
-- `PUBLIC`: name, ticker, side, quantity, average fill, notional, estimated sell P/L, and broker when available.
-- `NORMAL`: name, ticker, side, quantity, notional, and broker when available.
-- `PRIVATE`: anonymous member, ticker, and side only.
+- `PUBLIC`: name, ticker, side, quantity, execution price, total debit/credit, estimated sell return, and broker when available.
+- `NORMAL`: name, ticker, side, quantity, execution price, total debit/credit, and broker when available.
+- `PRIVATE`: anonymous member, ticker, side, and broker only.
 - `OFF`: no group alerts.
 
 TradePing only posts group alerts from broker execution/order records. Position changes without a matching broker order are kept for diagnostics because they can be stale or ambiguous.

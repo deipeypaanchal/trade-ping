@@ -54,6 +54,8 @@ export const ALERT = {
   MAX_ATTEMPTS: 8,
   /** Or after this much wall-clock time since the trade fired — whichever first. */
   MAX_AGE_MS: 48 * 60 * 60 * 1000,
+  /** Show the broker-received timestamp when detection materially trails execution. */
+  DELAYED_FEED_THRESHOLD_MS: 15 * 60 * 1000,
 } as const;
 
 export const AUTO_SYNC = {

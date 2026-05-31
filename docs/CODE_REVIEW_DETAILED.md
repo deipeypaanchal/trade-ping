@@ -284,7 +284,7 @@ Aggregations would create FINRA/SEC-style "investment adviser" exposure. The sch
 
 ### 9.3 Disclaimer in every alert — `OK`
 
-`AlertService.render` always appends "Read-only social alert. Not financial advice." Mirrors `docs/DISCLAIMER.md`.
+`AlertService.render` always appends a compact broker-confirmed, read-only, not-financial-advice footer. Mirrors `docs/DISCLAIMER.md`.
 
 ### 9.4 User comprehension — `P2 OPEN`
 

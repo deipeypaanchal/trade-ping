@@ -29,7 +29,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       lastAlertAttemptAt: null,
       user: { displayName: '@trader', timeZone: 'America/New_York' },
       group: { telegramChatId: '-100', inferredAlertsEnabled: false },
-      account: { connection: { brokerageName: 'Robinhood' } },
+      account: { accountType: 'INDIVIDUAL', connection: { brokerageName: 'Robinhood' } },
       ...overrides,
     };
   }
@@ -72,31 +72,31 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).toContain('$123456789.99');
-    expect(sentTexts[0]).toContain('Notional: $1234567899.87');
+    expect(sentTexts[0]).toContain('10 shares @ $123,456,789.987');
+    expect(sentTexts[0]).toContain('Total debit · $1,234,567,899.87');
   });
 
-  it('shows quantity and notional in normal privacy mode', async () => {
+  it('shows quantity, execution price, and total in normal privacy mode', async () => {
     const event = makeEvent();
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'NORMAL' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Qty: 10');
-    expect(sentTexts[0]).not.toContain('Avg fill: $150.25');
-    expect(sentTexts[0]).toContain('Notional: $1502.50');
+    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL</b>');
+    expect(sentTexts[0]).toContain('@trader · Robinhood');
+    expect(sentTexts[0]).toContain('10 shares @ $150.25');
+    expect(sentTexts[0]).toContain('Total debit · $1,502.50');
   });
 
-  it('adds average fill in public privacy mode', async () => {
-    const event = makeEvent();
+  it('adds estimated return in public privacy mode', async () => {
+    const event = makeEvent({ side: 'SELL', profitLoss: new Decimal('25.50'), profitLossPct: new Decimal('12.75') });
     const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Avg fill: $150.25');
+    expect(sentTexts[0]).toContain('Est. return · +$25.50 (+12.75%)');
   });
 
   it('does not send inferred position-delta alerts', async () => {
@@ -152,7 +152,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Est. profit: +$25.50 (+12.75%)');
+    expect(sentTexts[0]).toContain('Est. return · +$25.50 (+12.75%)');
   });
 
   it('renders options with strike, type, expiry and contract-multiplier notional', async () => {
@@ -172,10 +172,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('AAPL $150.00 Call exp Mar 21, 2025');
-    expect(sentTexts[0]).toContain('Contracts: 1');
-    expect(sentTexts[0]).toContain('Avg fill: $5.23 premium');
-    expect(sentTexts[0]).toContain('Notional: $523.00');
+    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL $150.00 Call</b>');
+    expect(sentTexts[0]).toContain('Expires · Mar 21, 2025');
+    expect(sentTexts[0]).toContain('1 contract @ $5.23 premium');
+    expect(sentTexts[0]).toContain('Total debit · $523.00');
   });
 
   it('legacy options without assetType still get 100x notional via symbol shape', async () => {
@@ -185,8 +185,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Avg fill: $0.18 premium');
-    expect(sentTexts[0]).toContain('Notional: $18.00');
+    expect(sentTexts[0]).toContain('1 contract @ $0.18 premium');
+    expect(sentTexts[0]).toContain('Total debit · $18.00');
   });
 
   it('hides size details in private privacy mode', async () => {
@@ -196,9 +196,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('Anonymous member bought AAPL');
-    expect(sentTexts[0]).not.toContain('Qty:');
-    expect(sentTexts[0]).not.toContain('Notional:');
+    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL</b>');
+    expect(sentTexts[0]).toContain('Anonymous member · Robinhood');
+    expect(sentTexts[0]).not.toContain('shares @');
+    expect(sentTexts[0]).not.toContain('Total debit');
   });
 
   it("uses the user's timezone when set", async () => {
@@ -209,7 +210,75 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain(`Time: ${tradeTime.toLocaleString('en-US', { timeZone: 'Europe/London' })}`);
+    expect(sentTexts[0]).toContain(`Executed · ${tradeTime.toLocaleString('en-US', {
+      timeZone: 'Europe/London',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    })}`);
+  });
+
+  it('labels delayed broker arrivals with both timestamps', async () => {
+    const tradeTime = new Date(Date.now() - 60 * 60_000);
+    const createdAt = new Date();
+    const event = makeEvent({ tradeTime, createdAt, account: { accountType: 'NP', connection: { brokerageName: 'Fidelity' } } });
+    const { svc, prisma, sentTexts } = makeService();
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain(`Executed · ${tradeTime.toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    })}`);
+    expect(sentTexts[0]).toContain(`Received · ${createdAt.toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    })}`);
+    expect(sentTexts[0]).toContain('◷ Broker-confirmed execution · Read-only · Not financial advice');
+  });
+
+  it('formats crypto with useful precision and its ticker as the unit', async () => {
+    const event = makeEvent({
+      symbol: 'BTC',
+      quantity: new Decimal('0.01443642'),
+      price: new Decimal('73353.67118885'),
+      account: { accountType: 'DIGITALASSET', connection: { brokerageName: 'Robinhood' } },
+    });
+    const { svc, prisma, sentTexts } = makeService();
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('0.01443642 BTC @ $73,353.67118885');
+    expect(sentTexts[0]).toContain('Total debit · $1,058.96');
+  });
+
+  it('escapes the crypto ticker before rendering it as the quantity unit', async () => {
+    const event = makeEvent({
+      symbol: 'BTC<&',
+      account: { accountType: 'DIGITALASSET', connection: { brokerageName: 'Robinhood' } },
+    });
+    const { svc, prisma, sentTexts } = makeService();
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await svc.sendTradeAlert('trade-1');
+
+    expect(sentTexts[0]).toContain('BTC&lt;&amp;');
+    expect(sentTexts[0]).not.toContain('BTC<&');
   });
 
   it('marks SKIPPED on permanent 4xx telegram failure', async () => {

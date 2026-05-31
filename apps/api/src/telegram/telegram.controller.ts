@@ -251,9 +251,9 @@ export class TelegramController {
     return [
       'Set how your trades appear in this group.',
       'This is per user, per group:',
-      '/privacy public  — name, symbol, quantity, avg price, value and broker',
-      '/privacy normal  — name, symbol, quantity, value and broker (default)',
-      '/privacy private — anonymous, symbol only',
+      '/privacy public  — name, symbol, quantity, execution price, total, estimated sell return and broker',
+      '/privacy normal  — name, symbol, quantity, execution price, total and broker (default)',
+      '/privacy private — anonymous, symbol, side and broker only',
       '/privacy off     — no alerts',
     ].join('\n');
   }

@@ -92,20 +92,21 @@ export class AlertService {
 
   private render(event: RenderableTrade, level: PrivacyLevel): string {
     const emoji = event.side === 'BUY' ? '🟢' : '🔴';
-    const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const headline = this.headlineSubject(event);
-    const inferred = this.isInferred(event);
-    const lines = [`${emoji} ${this.escape(actor)} ${verb} ${this.escape(headline)}`];
+    const broker = event.account?.connection?.brokerageName;
+    const lines = [
+      `<b>${emoji} ${event.side} · ${this.escape(headline)}</b>`,
+      [this.escape(actor), broker ? this.escape(broker) : null].filter(Boolean).join(' · '),
+    ];
     if (level !== 'PRIVATE') {
       const details = this.tradeDetails(event, level);
-      if (details) lines.push(details);
+      if (details) lines.push('', details);
     }
-    if (inferred) lines.push('Position-change alert; broker execution not provided yet.');
-    if (level !== 'PRIVATE' && event.account?.connection?.brokerageName) lines.push(`Broker: ${this.escape(event.account.connection.brokerageName)}`);
     const tz = event.user?.timeZone || TIME.DEFAULT_TIMEZONE;
-    lines.push(`Time: ${new Date(event.tradeTime).toLocaleString('en-US', { timeZone: tz })}`);
-    lines.push('Read-only social alert. Not financial advice.');
+    lines.push('', `Executed · ${this.formatTimestamp(event.tradeTime, tz)}`);
+    if (this.isDelayed(event)) lines.push(`Received · ${this.formatTimestamp(event.createdAt, tz)}`);
+    lines.push('', `${this.isDelayed(event) ? '◷' : '✓'} Broker-confirmed execution · Read-only · Not financial advice`);
     return lines.join('\n');
   }
 
@@ -115,25 +116,20 @@ export class AlertService {
     const underlying = event.underlying || event.symbol;
     const type = event.optionType ? this.titleCase(event.optionType) : '';
     const strike = event.optionStrike !== null && event.optionStrike !== undefined ? `$${this.formatDecimal(event.optionStrike, 2)} ` : '';
-    const expiry = event.optionExpiration ? ` exp ${this.formatExpiry(event.optionExpiration)}` : '';
-    return `${underlying} ${strike}${type}${expiry}`.replace(/\s+/g, ' ').trim();
+    return `${underlying} ${strike}${type}`.replace(/\s+/g, ' ').trim();
   }
 
   private tradeDetails(event: RenderableTrade, level: PrivacyLevel): string | null {
-    const quantity = event.quantity ? this.formatDecimal(event.quantity) : null;
-    const price = event.price ? this.formatDecimal(event.price, 2) : null;
+    const assetType = this.assetType(event);
+    const quantity = event.quantity ? this.formatQuantity(event.quantity, assetType) : null;
+    const price = event.price ? this.formatPrice(event.price, assetType) : null;
     const value = event.quantity && event.price ? this.formatCurrency(this.tradeValue(event)) : null;
-    const isOption = this.assetType(event) === 'OPTION';
-    const inferred = this.isInferred(event);
-    const qtyLabel = isOption ? 'Contracts' : 'Qty';
-    const priceSuffix = isOption && event.priceSource === 'EXECUTION' ? ' premium' : '';
-    const priceLabel = inferred ? 'Est. position price' : 'Avg fill';
-    const valueLabel = inferred ? 'Est. value' : 'Notional';
+    const quantityLine = quantity ? this.quantityLine(quantity, price, event.symbol, assetType) : null;
     const details = [
-      quantity ? `${qtyLabel}: ${quantity}` : null,
-      level === 'PUBLIC' && price ? `${priceLabel}: $${price}${priceSuffix}` : null,
-      value ? `${valueLabel}: ${value}` : null,
-      ...(level === 'PUBLIC' && !inferred ? this.profitDetails(event) : []),
+      assetType === 'OPTION' && event.optionExpiration ? `Expires · ${this.formatExpiry(event.optionExpiration)}` : null,
+      quantityLine,
+      value ? `Total ${event.side === 'BUY' ? 'debit' : 'credit'} · ${value}` : null,
+      ...(level === 'PUBLIC' ? this.profitDetails(event) : []),
     ].filter(Boolean);
     return details.length ? details.join('\n') : null;
   }
@@ -143,11 +139,10 @@ export class AlertService {
     if (event.profitLoss !== null && event.profitLoss !== undefined) {
       const amount = this.decimal(event.profitLoss);
       const pct = event.profitLossPct !== null && event.profitLossPct !== undefined ? this.decimal(event.profitLossPct) : null;
-      const label = amount.greaterThanOrEqualTo(0) ? 'Est. profit' : 'Est. loss';
       const pctText = pct ? ` (${pct.greaterThanOrEqualTo(0) ? '+' : ''}${pct.toFixed(2)}%)` : '';
-      return [`${label}: ${this.formatSignedCurrency(amount)}${pctText}`];
+      return [`Est. return · ${this.formatSignedCurrency(amount)}${pctText}`];
     }
-    return ['P/L unavailable; cost basis missing.'];
+    return [];
   }
 
   /** Decimal-safe formatter. Avoid Number() coercion that would lose precision on large values. */
@@ -165,12 +160,12 @@ export class AlertService {
   }
 
   private formatCurrency(value: Decimal): string {
-    return `$${value.toFixed(2)}`;
+    return `$${this.withGrouping(value.toFixed(2))}`;
   }
 
   private formatSignedCurrency(value: Decimal): string {
     const prefix = value.greaterThanOrEqualTo(0) ? '+' : '-';
-    return `${prefix}$${value.abs().toFixed(2)}`;
+    return `${prefix}$${this.withGrouping(value.abs().toFixed(2))}`;
   }
 
   private tradeValue(event: RenderableTrade): Decimal {
@@ -182,8 +177,62 @@ export class AlertService {
   }
 
   private assetType(event: RenderableTrade): AssetType {
+    if (event.account?.accountType?.toUpperCase() === 'DIGITALASSET') return 'CRYPTO';
     if (typeof event.assetType === 'string' && event.assetType) return event.assetType as AssetType;
     return isOptionSymbol(String(event.symbol)) ? 'OPTION' : 'EQUITY';
+  }
+
+  private quantityLine(quantity: string, price: string | null, symbol: string, assetType: AssetType): string {
+    const unit = assetType === 'OPTION'
+      ? this.plural(quantity, 'contract')
+      : assetType === 'CRYPTO'
+        ? this.escape(symbol)
+        : this.plural(quantity, 'share');
+    return price
+      ? `${quantity} ${unit} @ $${price}${assetType === 'OPTION' ? ' premium' : ''}`
+      : `${quantity} ${unit} · Execution price unavailable`;
+  }
+
+  private formatQuantity(value: Decimal, assetType: AssetType): string {
+    return this.trimDecimal(value, assetType === 'CRYPTO' ? 8 : 6, 0);
+  }
+
+  private formatPrice(value: Decimal, assetType: AssetType): string {
+    return this.withGrouping(this.trimDecimal(value, assetType === 'CRYPTO' ? 8 : assetType === 'EQUITY' ? 4 : 2, 2));
+  }
+
+  private trimDecimal(value: Decimal, maxFractionDigits: number, minFractionDigits: number): string {
+    const fixed = value.toFixed(maxFractionDigits);
+    const [whole, fraction = ''] = fixed.split('.');
+    const trimmed = fraction.replace(/0+$/, '');
+    const kept = trimmed.padEnd(minFractionDigits, '0');
+    return kept ? `${whole}.${kept}` : whole;
+  }
+
+  private withGrouping(value: string): string {
+    const [whole, fraction] = value.split('.');
+    const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return fraction === undefined ? grouped : `${grouped}.${fraction}`;
+  }
+
+  private plural(quantity: string, singular: string): string {
+    return quantity === '1' ? singular : `${singular}s`;
+  }
+
+  private formatTimestamp(value: Date, timeZone: string): string {
+    return new Date(value).toLocaleString('en-US', {
+      timeZone,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    });
+  }
+
+  private isDelayed(event: Pick<RenderableTrade, 'createdAt' | 'tradeTime'>): boolean {
+    return event.createdAt.getTime() - event.tradeTime.getTime() >= ALERT.DELAYED_FEED_THRESHOLD_MS;
   }
 
   private titleCase(s: string): string {
