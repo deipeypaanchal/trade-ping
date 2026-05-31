@@ -31,6 +31,6 @@ export type RenderableTrade = {
   rawType: string | null;
   rawStatus: string | null;
   user: { displayName: string; timeZone: string | null };
-  group: { telegramChatId: string; inferredAlertsEnabled: boolean } | null;
+  group: { telegramChatId: string } | null;
   account: { connection: { brokerageName: string | null } | null } | null;
 };

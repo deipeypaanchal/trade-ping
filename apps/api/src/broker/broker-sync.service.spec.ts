@@ -94,7 +94,7 @@ describe('BrokerSyncService position-delta guards', () => {
     expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
-  it('sends position deltas when the group opts into inferred alerts', async () => {
+  it('keeps position deltas diagnostic-only even if a legacy group flag is enabled', async () => {
     const prisma = {
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
@@ -105,7 +105,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn(),
       },
       tradeEvent: {
-        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
       },
       auditLog: { create: jest.fn() },
     };
@@ -132,11 +132,11 @@ describe('BrokerSyncService position-delta guards', () => {
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false);
 
-    expect(result).toEqual({ created: 1, alerted: 1 });
+    expect(result).toEqual({ created: 1, alerted: 0 });
     expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'PENDING' }),
+      create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'SKIPPED' }),
     }));
-    expect(alerts.sendTradeAlert).toHaveBeenCalledWith('trade-1');
+    expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
   it('does not treat failed order fetches as successful syncs', async () => {
@@ -154,12 +154,34 @@ describe('BrokerSyncService position-delta guards', () => {
       null as never,
       config as never,
     ) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ ok: boolean; orders: unknown[] }>;
+      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ ok: false, orders: [] });
+    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, orders: [] });
     expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: 'broker_sync_orders_failed' }),
     }));
+  });
+
+  it('processes historical orders when the recent endpoint fails', async () => {
+    const historical = [{ brokerage_order_id: 'fidelity-1', status: 'EXECUTED', action: 'BUY' }];
+    const prisma = { auditLog: { create: jest.fn() } };
+    const snap = {
+      listRecentAccountOrders: jest.fn().mockRejectedValue(new Error('recent unavailable')),
+      listAccountOrders: jest.fn().mockResolvedValue(historical),
+    };
+    const config = { getOrThrow: jest.fn().mockReturnValue(3) };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      snap as never,
+      null as never,
+      null as never,
+      config as never,
+    ) as unknown as {
+      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; orders: unknown[] }>;
+    };
+
+    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, orders: historical });
   });
 });

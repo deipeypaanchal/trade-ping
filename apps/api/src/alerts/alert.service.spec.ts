@@ -113,7 +113,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
   });
 
-  it('sends clearly labeled inferred alerts when the group opts in', async () => {
+  it('does not send inferred alerts even if a legacy group flag is enabled', async () => {
     const recent = new Date(Date.now() - 5 * 60_000);
     const event = makeEvent({
       rawType: 'position_delta',
@@ -123,16 +123,14 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       createdAt: recent,
       group: { telegramChatId: '-100', inferredAlertsEnabled: true },
     });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     const ok = await svc.sendTradeAlert('trade-1');
 
-    expect(ok).toBe(true);
-    expect(sentTexts[0]).toContain('Est. position price: $150.25');
-    expect(sentTexts[0]).toContain('Est. value: $1502.50');
-    expect(sentTexts[0]).toContain('Position-change alert; broker execution not provided yet.');
-    expect(sentTexts[0]).not.toContain('Avg fill');
+    expect(ok).toBe(false);
+    expect(sendImpl).not.toHaveBeenCalled();
   });
 
   it('skips stale inferred alerts without touching Telegram', async () => {

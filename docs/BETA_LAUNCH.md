@@ -16,7 +16,7 @@ You control your visibility with /privacy:
 public, normal, private, or off.
 
 Broker freshness varies. Some brokers are close to real time; Fidelity/IBKR can be delayed up to 24h.
-TradePing posts only broker-reported execution/order records. Position-only changes are used for diagnostics, not group alerts.
+TradePing posts only broker-reported execution/order records. Position-only changes are used for diagnostics, not group alerts. This is an invariant, not a configurable group setting: cached holdings can be stale or oscillate between snapshots.
 Use /trust to see what data is bot-level, user-level, and group-level.
 ```
 

@@ -30,8 +30,8 @@ export class AlertService {
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
-    if (this.isInferred(event) && !event.group.inferredAlertsEnabled) {
-      this.logger.warn(`skipping inferred trade ${event.id}; group alerts require broker execution records`);
+    if (this.isInferred(event)) {
+      this.logger.warn(`skipping inferred trade ${event.id}; holdings changes are diagnostic-only`);
       await this.mark(event.id, 'SKIPPED');
       return false;
     }

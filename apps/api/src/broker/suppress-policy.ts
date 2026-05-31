@@ -16,18 +16,13 @@ export type SuppressInput = {
   suppressBackfill: boolean;
   /** Configured "anything older than this is backfill" window. */
   backfillSuppressHours: number;
-  /** Last time we successfully synced this account, if any. Used to widen
-   *  the suppression window when the worker was offline for longer than
-   *  the static backfill window. Prevents re-alerting trades that were
-   *  already alerted before a long outage. */
-  lastSuccessfulSyncAt?: Date | null;
   /** Now, injected for deterministic tests. */
   now?: Date;
 };
 
 export type SuppressDecision = {
   suppress: boolean;
-  reason: 'suppress_backfill_flag' | 'first_sync' | 'older_than_backfill_window' | 'older_than_last_sync' | 'fresh';
+  reason: 'suppress_backfill_flag' | 'first_sync' | 'older_than_backfill_window' | 'fresh';
 };
 
 export function shouldSuppressAlert(input: SuppressInput): SuppressDecision {
@@ -38,15 +33,11 @@ export function shouldSuppressAlert(input: SuppressInput): SuppressDecision {
   const tradeMs = input.tradeTime.getTime();
   const backfillCutoff = now - input.backfillSuppressHours * 3_600_000;
 
-  // Take the EARLIER of (now − backfillHours) and the last successful sync.
-  // If the bot was offline for longer than the static window, trades from
-  // the outage window have already been alerted in the previous run; cut
-  // them out so a restart doesn't replay them.
-  const lastSyncMs = input.lastSuccessfulSyncAt?.getTime();
-  const effectiveCutoff = lastSyncMs !== undefined ? Math.max(backfillCutoff, lastSyncMs) : backfillCutoff;
-
-  if (tradeMs < effectiveCutoff) {
-    return { suppress: true, reason: lastSyncMs !== undefined && lastSyncMs > backfillCutoff ? 'older_than_last_sync' : 'older_than_backfill_window' };
+  // The event dedupe hash prevents re-alerting orders already persisted before
+  // an outage. Do not use the last sync time as a cutoff: delayed brokers can
+  // surface a genuinely new execution hours after it happened.
+  if (tradeMs < backfillCutoff) {
+    return { suppress: true, reason: 'older_than_backfill_window' };
   }
   return { suppress: false, reason: 'fresh' };
 }
