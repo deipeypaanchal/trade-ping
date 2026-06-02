@@ -19,7 +19,7 @@ connected brokers, broker freshness, last sync check, and latest detected trade.
 
 - Hosting: Railway API service plus Railway Postgres and Redis.
 - Deployment: Dockerfile image, non-root runtime user, `tini` for signal handling.
-- Health: Railway health check uses `/healthz`, which verifies Postgres with `SELECT 1`.
+- Health: Railway health check uses `/healthz`, which verifies Postgres with `SELECT 1` and Redis with `PING`.
 - Liveness: `/livez` is available for a cheap process-only check.
 - Jobs: BullMQ queue in Redis, worker concurrency 2, job limiter 30 jobs/minute.
 - Sync: automatic `sync-all` every `SYNC_INTERVAL_MINUTES`, currently intended to be 1 minute for beta.
@@ -50,6 +50,7 @@ Recommended launch thresholds:
 - Broker-specific data delay: Fidelity/IBKR may not expose same-day activity to SnapTrade. `/sync` cannot force data SnapTrade has not received yet.
 - Telegram 429s: per-chat limiter protects groups, but bursts can delay alerts.
 - Database availability: `/healthz` catches this before deploys go active.
+- Disabled connections: use `/reconnect` to repair the original SnapTrade authorization instead of creating a duplicate with `/connect`.
 - Schema drift: always run `pnpm db:deploy` after pulling migrations.
 - Secrets: rotate bot/SnapTrade credentials before public launch because early setup used pasted secrets.
 

@@ -1,9 +1,11 @@
 import { Controller, Get, HttpCode, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
 
 @Controller()
 export class HealthController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, @InjectQueue('trade-sync') private readonly queue: Queue) {}
 
   /**
    * Liveness + readiness in one endpoint. Returns 200 only if Postgres is
@@ -16,6 +18,9 @@ export class HealthController {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
       checks.database = 'up';
+      const redis = await this.queue.client;
+      await redis.ping();
+      checks.redis = 'up';
     } catch (err) {
       checks.database = `down: ${(err as Error).message}`;
       throw new ServiceUnavailableException({ ok: false, service: 'tradeping-api', time: new Date().toISOString(), checks });

@@ -54,7 +54,7 @@ export class SnaptradeWebhookController {
     const expected = this.crypto.hmacBase64(this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY'), canonical);
     if (!this.crypto.safeEqual(signature, expected)) throw new UnauthorizedException('Invalid SnapTrade signature');
     const age = body.eventTimestamp ? Date.now() - new Date(body.eventTimestamp).getTime() : NaN;
-    if (!Number.isFinite(age) || age > WEBHOOK.REPLAY_WINDOW_MS) throw new UnauthorizedException('Stale SnapTrade webhook');
+    if (!Number.isFinite(age) || age > WEBHOOK.REPLAY_WINDOW_MS || age < -WEBHOOK.FUTURE_TOLERANCE_MS) throw new UnauthorizedException('Stale SnapTrade webhook');
 
     // Replay protection: persist the canonical hash; reject duplicates. Postgres
     // unique-violation on the second insert is treated as "already processed".
@@ -62,56 +62,57 @@ export class SnaptradeWebhookController {
     const expiresAt = new Date(Date.now() + WEBHOOK.IDEMPOTENCY_TTL_MS);
     try {
       await this.prisma.idempotencyKey.create({ data: { key: nonce, expiresAt } });
-    } catch {
-      // Already seen — silently ack so SnapTrade stops retrying.
-      return { ok: true, replay: true };
-    }
-
-    await this.prisma.auditLog.create({ data: { action: 'snaptrade_webhook_received', metadata: { eventType: body.eventType, eventTimestamp: body.eventTimestamp, userId: body.userId } } });
-
-    const snapUserId = body.userId ? String(body.userId) : undefined;
-    const localUser = snapUserId ? await this.prisma.user.findUnique({ where: { snaptradeUserId: snapUserId }, select: { id: true } }) : null;
-
-    if (body.eventType === 'USER_DELETED' && localUser) {
-      try {
-        await this.prisma.user.delete({ where: { id: localUser.id } });
-      } catch (err) {
-        // P2025 = "record not found" — already deleted, idempotent.
-        // Anything else (FK violation, DB outage) must rethrow so SnapTrade
-        // redelivers; swallowing here was hiding real lifecycle errors.
-        if ((err as { code?: string }).code !== 'P2025') throw err;
+    } catch (err) {
+      if ((err as { code?: string }).code === 'P2002') {
+        // Already seen — silently ack so SnapTrade stops retrying.
+        return { ok: true, replay: true };
       }
-      return { ok: true };
+      throw err;
     }
 
-    if (body.eventType === 'CONNECTION_DELETED' && body.brokerageAuthorizationId) {
-      await this.prisma.brokerConnection.updateMany({
-        where: { authorizationId: String(body.brokerageAuthorizationId) },
-        data: { status: 'DISCONNECTED', disconnectedAt: new Date() },
-      });
-      return { ok: true };
-    }
+    try {
+      const snapUserId = body.userId ? String(body.userId) : undefined;
+      const localUser = snapUserId ? await this.prisma.user.findUnique({ where: { snaptradeUserId: snapUserId }, select: { id: true } }) : null;
 
-    if (body.eventType === 'CONNECTION_BROKEN' && body.brokerageAuthorizationId) {
-      await this.prisma.brokerConnection.updateMany({
-        where: { authorizationId: String(body.brokerageAuthorizationId) },
-        data: { status: 'ERROR', disabledReason: 'SnapTrade reported CONNECTION_BROKEN' },
-      });
-      return { ok: true };
-    }
-
-    if (body.eventType && SYNC_TRIGGER_EVENTS.has(body.eventType)) {
-      if (localUser) {
-        // jobId dedupes exact webhook redeliveries while allowing future events for the same user.
-        await this.queue.add(
-          'sync-user',
-          { userId: localUser.id },
-          { jobId: `sync-user:${localUser.id}:${eventJobKey}`, ...JOB_DEFAULTS },
-        );
-      } else if (!snapUserId) {
-        await this.queue.add('sync-all', {}, { jobId: `sync-all:${eventJobKey}`, ...JOB_DEFAULTS });
+      if (body.eventType === 'USER_DELETED' && localUser) {
+        try {
+          await this.prisma.user.delete({ where: { id: localUser.id } });
+        } catch (err) {
+          // P2025 = "record not found" — already deleted, idempotent.
+          // Anything else (FK violation, DB outage) must rethrow so SnapTrade
+          // redelivers; swallowing here was hiding real lifecycle errors.
+          if ((err as { code?: string }).code !== 'P2025') throw err;
+        }
+      } else if (body.eventType === 'CONNECTION_DELETED' && body.brokerageAuthorizationId) {
+        await this.prisma.brokerConnection.updateMany({
+          where: { authorizationId: String(body.brokerageAuthorizationId) },
+          data: { status: 'DISCONNECTED', disconnectedAt: new Date() },
+        });
+      } else if (body.eventType === 'CONNECTION_BROKEN' && body.brokerageAuthorizationId) {
+        await this.prisma.brokerConnection.updateMany({
+          where: { authorizationId: String(body.brokerageAuthorizationId) },
+          data: { status: 'ERROR', disabledReason: 'SnapTrade reported CONNECTION_BROKEN' },
+        });
+      } else if (body.eventType && SYNC_TRIGGER_EVENTS.has(body.eventType)) {
+        if (localUser) {
+          // jobId dedupes exact webhook redeliveries while allowing future events for the same user.
+          await this.queue.add(
+            'sync-user',
+            { userId: localUser.id },
+            { jobId: `sync-user:${localUser.id}:${eventJobKey}`, ...JOB_DEFAULTS },
+          );
+        } else if (!snapUserId) {
+          await this.queue.add('sync-all', {}, { jobId: `sync-all:${eventJobKey}`, ...JOB_DEFAULTS });
+        }
       }
+      await this.prisma.auditLog.create({ data: { action: 'snaptrade_webhook_received', metadata: { eventType: body.eventType, eventTimestamp: body.eventTimestamp, userId: body.userId } } });
+      return { ok: true };
+    } catch (err) {
+      // The nonce is only durable after all side effects succeed. If the DB or
+      // queue is temporarily unavailable, delete it so SnapTrade's retry can
+      // perform the work instead of being mistaken for a completed replay.
+      await this.prisma.idempotencyKey.delete({ where: { key: nonce } }).catch(() => undefined);
+      throw err;
     }
-    return { ok: true };
   }
 }

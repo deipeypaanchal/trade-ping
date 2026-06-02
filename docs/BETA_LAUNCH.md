@@ -17,6 +17,7 @@ public, normal, private, or off.
 
 Broker freshness varies. Some brokers are close to real time; Fidelity/IBKR can be delayed up to 24h.
 TradePing posts broker-reported execution/order records by default. A group admin may opt into clearly labeled provisional Robinhood holdings alerts with `/inferred on` when execution details are unavailable. Delayed brokers such as Fidelity and IBKR remain diagnostic-only because cached holdings can be stale or oscillate between snapshots.
+SnapTrade's realtime `recentOrders` capability is optional. TradePing continues using the standard order feed when it is unavailable, with freshness determined by the brokerage and SnapTrade plan.
 Use /trust to see what data is bot-level, user-level, and group-level.
 ```
 
@@ -31,6 +32,7 @@ TradePing group setup:
 
 Commands:
 /status - your connected brokers
+/reconnect - repair a disabled connection without creating a duplicate
 /diagnostics - why an alert may not have appeared
 /groupstatus - group setup health
 /trust - read-only trust model
@@ -61,8 +63,9 @@ When someone says "my trade did not ping":
 2. Check if alerts are off or privacy is private.
 3. Check broker freshness. Fidelity/IBKR can lag up to 24h.
 4. Check `/groupstatus` for pending alerts or worker failures.
-5. If the broker should be fresh, inspect recent `AuditLog` and `TradeEvent` rows.
-6. If SnapTrade does not expose the order/position, capture request IDs and ask SnapTrade support.
+5. If `/status` reports a disabled connection, run `/reconnect`.
+6. If the broker should be fresh, inspect recent `AuditLog` and `TradeEvent` rows.
+7. If SnapTrade does not expose the order/position, capture request IDs and ask SnapTrade support.
 
 ## Beta Quality Bar
 

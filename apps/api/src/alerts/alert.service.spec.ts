@@ -39,18 +39,22 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     const prisma = {
       tradeEvent: {
         findUniqueOrThrow: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
       },
       groupMember: {
         findUnique: jest.fn().mockResolvedValue(opts.member ?? { alertsEnabled: true, privacyLevel: 'PUBLIC' }),
       },
-      alert: { create: jest.fn() },
+      alert: { create: jest.fn(), update: jest.fn() },
+      auditLog: { create: jest.fn() },
     } as unknown as PrismaService;
+    (prisma as unknown as { $transaction: jest.Mock }).$transaction = jest.fn(async (fn: (tx: PrismaService) => Promise<unknown>) => fn(prisma));
     const telegram = {
       sendMessage: opts.sendImpl ?? jest.fn().mockImplementation(async (_chat: string, text: string) => {
         sentTexts.push(text);
         return { message_id: 1 };
       }),
+      editMessageText: jest.fn(),
     } as unknown as TelegramService;
     return { svc: new AlertService(prisma, telegram), prisma, telegram, sentTexts };
   }
@@ -97,6 +101,33 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await svc.sendTradeAlert('trade-1');
 
     expect(sentTexts[0]).toContain('Est. return · +$25.50 (+12.75%)');
+  });
+
+  it('upgrades a matching provisional Telegram alert inline when the execution arrives', async () => {
+    const event = makeEvent({ account: { id: 'account-1', accountType: 'INDIVIDUAL', connection: { brokerageName: 'Robinhood' } } });
+    const sendImpl = jest.fn();
+    const { svc, prisma, telegram } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+    (prisma.tradeEvent.findFirst as jest.Mock).mockResolvedValue({
+      id: 'provisional-trade-1',
+      alerts: [{ id: 'provisional-alert-1', messageId: '42' }],
+    });
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
+
+    expect(telegram.editMessageText).toHaveBeenCalledWith('-100', 42, expect.stringContaining('<b>🟢 BUY · AAPL</b>'));
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.alert.update).toHaveBeenCalledWith({ where: { id: 'provisional-alert-1' }, data: { renderedText: expect.stringContaining('Broker-confirmed execution') } });
+    expect(prisma.alert.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ tradeEventId: 'trade-1', renderedText: expect.stringContaining('Broker-confirmed execution'), messageId: '42' }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: {
+        userId: 'user-1',
+        action: 'provisional_alert_upgraded',
+        metadata: { provisionalTradeEventId: 'provisional-trade-1', confirmedTradeEventId: 'trade-1', messageId: 42 },
+      },
+    });
   });
 
   it('does not send inferred position-delta alerts', async () => {

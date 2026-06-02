@@ -53,7 +53,7 @@ export class SnaptradeService {
     await this.sdk().authentication.deleteSnapTradeUser({ userId });
   }
 
-  async connectionPortal(userId: string, userSecret: string, groupId: string): Promise<SnapTradePortal> {
+  async connectionPortal(userId: string, userSecret: string, groupId: string, reconnect?: string): Promise<SnapTradePortal> {
     if (this.mock) {
       return { redirectURI: `${this.config.getOrThrow<string>('APP_BASE_URL')}/snaptrade/callback?mock=true`, sessionId: 'mock-session' };
     }
@@ -63,6 +63,7 @@ export class SnaptradeService {
       userId,
       userSecret,
       broker,
+      reconnect,
       connectionType: 'read',
       immediateRedirect: true,
       customRedirect,

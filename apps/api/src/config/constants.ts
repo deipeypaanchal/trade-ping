@@ -22,6 +22,8 @@ export const LIMITS = {
 export const WEBHOOK = {
   /** Maximum age of a SnapTrade webhook (replay protection). */
   REPLAY_WINDOW_MS: 5 * 60_000,
+  /** Permit small provider/server clock skew while rejecting future-dated replays. */
+  FUTURE_TOLERANCE_MS: 60_000,
   /** How long to remember a SnapTrade event signature for replay-rejection. */
   IDEMPOTENCY_TTL_MS: 10 * 60_000,
 } as const;

@@ -76,6 +76,10 @@ export class TelegramService implements OnModuleInit {
     return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, options, 0));
   }
 
+  async editMessageText(chatId: string, messageId: number, text: string): Promise<void> {
+    return this.perChat.key(chatId).schedule(() => this.doEdit(chatId, messageId, text, 0));
+  }
+
   async setWebhook(): Promise<void> {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const url = `${this.config.getOrThrow<string>('APP_BASE_URL')}/telegram/webhook`;
@@ -110,6 +114,7 @@ export class TelegramService implements OnModuleInit {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const commands = [
       { command: 'connect', description: 'Connect a read-only brokerage' },
+      { command: 'reconnect', description: 'Repair a disabled brokerage connection' },
       { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
       { command: 'trust', description: 'What is bot, user, and group level' },
       { command: 'diagnostics', description: 'Explain latest sync and broker freshness' },
@@ -150,6 +155,25 @@ export class TelegramService implements OnModuleInit {
     if (!res.ok) throw new TelegramApiError(`Telegram sendMessage failed: ${res.status} ${body}`, res.status);
     const json = JSON.parse(body) as { result?: { message_id: number } };
     return { message_id: json.result?.message_id };
+  }
+
+  private async doEdit(chatId: string, messageId: number, text: string, attempt: number): Promise<void> {
+    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    const body = await res.text();
+    if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
+      const retryAfterSec = this.retryAfter(body);
+      this.logger.warn(`Telegram 429 editing chat ${chatId}; retrying in ${retryAfterSec}s`);
+      await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
+      return this.doEdit(chatId, messageId, text, attempt + 1);
+    }
+    // A retry after a DB error may edit a message that already has the final
+    // text. Telegram reports that idempotent state as HTTP 400.
+    if (res.status === 400 && body.includes('message is not modified')) return;
+    if (!res.ok) throw new TelegramApiError(`Telegram editMessageText failed: ${res.status} ${body}`, res.status);
   }
 
   private retryAfter(body: string): number {

@@ -21,11 +21,11 @@ export class AutoSyncService implements OnModuleInit, OnModuleDestroy {
     const minutes = this.config.getOrThrow<number>('SYNC_INTERVAL_MINUTES');
     const intervalMs = minutes * 60_000;
     this.logger.log(`automatic trade sync enabled every ${minutes} minute(s)`);
-    this.timer = setInterval(() => void this.enqueue('interval'), intervalMs);
+    this.timer = setInterval(() => void this.safeEnqueue('interval'), intervalMs);
     // Boot enqueue is delayed AND gated on "was there a recent sync?". This
     // is the single biggest defence against redeploy spam: a restart should
     // not retrigger sync work that another worker already finished moments ago.
-    this.bootTimer = setTimeout(() => void this.enqueueIfStale(), AUTO_SYNC.BOOT_INITIAL_DELAY_MS);
+    this.bootTimer = setTimeout(() => void this.enqueueIfStale().catch((err) => this.logger.warn(`boot sync enqueue failed: ${(err as Error).message}`)), AUTO_SYNC.BOOT_INITIAL_DELAY_MS);
   }
 
   onModuleDestroy() {
@@ -47,6 +47,14 @@ export class AutoSyncService implements OnModuleInit, OnModuleDestroy {
     const windowId = Math.floor(Date.now() / (minutes * 60_000));
     await this.queue.add('sync-all', { reason }, { jobId: `auto-sync-all-${windowId}`, ...JOB_DEFAULTS });
     await this.stampLastAutoSync();
+  }
+
+  private async safeEnqueue(reason: 'boot' | 'interval') {
+    try {
+      await this.enqueue(reason);
+    } catch (err) {
+      this.logger.warn(`${reason} sync enqueue failed: ${(err as Error).message}`);
+    }
   }
 
   private async lastAutoSyncAt(): Promise<Date | null> {

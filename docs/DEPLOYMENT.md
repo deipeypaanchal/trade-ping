@@ -15,7 +15,7 @@ A single NestJS HTTP service (`@tradeping/api`) that:
 - Listens for SnapTrade events at `POST /snaptrade/webhook`.
 - Hosts an internal `POST /jobs/...` API for scheduled syncs.
 - Runs an in-process BullMQ worker that talks to SnapTrade and posts Telegram alerts.
-- Health check: `GET /healthz`.
+- Health check: `GET /healthz` verifies Postgres and Redis.
 
 Dependencies it requires at runtime:
 
@@ -368,7 +368,7 @@ SELECT u."displayName", c."brokerageName", c.status, c."disabledReason", c."upda
 | --- | --- | --- |
 | Telegram returns 401 on `setWebhook` | bot token revoked / wrong | rotate token, re-register webhook |
 | `getWebhookInfo` shows `last_error_message: "Wrong response from the webhook: 401 Unauthorized"` | `TELEGRAM_WEBHOOK_SECRET` mismatch between env and registration | re-run `setWebhook` with current env |
-| Group alerts stop for one user only | connection went `DISABLED` / `ERROR` | user runs `/status`, then `/connect` (which reconnects); or use SnapTrade reconnect flow |
+| Group alerts stop for one user only | connection went `DISABLED` / `ERROR` | user runs `/status`, then `/reconnect`. If more than one connection needs repair, use `/reconnect <broker>` |
 | `/connect` fails with "SnapTrade did not return redirectURI" | SnapTrade rejected the login call (likely auth-key issue) | verify `SNAPTRADE_CLIENT_ID` / `SNAPTRADE_CONSUMER_KEY` and that the API key isn't disabled in the dashboard |
 | Service won't start, logs `ZodError` | missing or malformed env var | check `apps/api/src/config/env.ts` against your env |
 | Worker logs `429 Too Many Requests` from Telegram | bursting in one chat | already handled by the per-chat limiter; if it persists, lower `concurrency` in `apps/api/src/workers/trade-sync.processor.ts` |

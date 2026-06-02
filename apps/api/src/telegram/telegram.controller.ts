@@ -57,6 +57,14 @@ export class TelegramController {
         }
         const url = await this.onboarding.createConnectUrl(user.id, group.id);
         await this.sendConnectLink(msg.chat.type, chatId, String(msg.from.id), url);
+      } else if (this.cmd(text, '/reconnect')) {
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Run /reconnect inside your TradePing group so the repaired connection stays linked to the right alert destination.');
+          return { ok: true };
+        }
+        const broker = text.split(/\s+/).slice(1).join(' ') || undefined;
+        const url = await this.onboarding.createReconnectUrl(user.id, group.id, broker);
+        await this.sendReconnectLink(msg.chat.type, chatId, String(msg.from.id), url);
       } else if (this.cmd(text, '/privacy')) {
         if (!group) {
           await this.telegram.sendMessage(chatId, 'Privacy is per user, per group. Run /privacy public, normal, private, or off inside the TradePing group you want to change.');
@@ -194,6 +202,27 @@ export class TelegramController {
     }
   }
 
+  private async sendReconnectLink(chatType: string, chatId: string, telegramUserId: string, url: string) {
+    const text = [
+      'Repair your existing read-only brokerage connection:',
+      url,
+      '',
+      'Use the same brokerage login you linked before. Repairing it preserves your existing connection history and avoids duplicates.',
+      '',
+      'The link expires in about 5 minutes.',
+    ].join('\n');
+    if (chatType === 'private') {
+      await this.telegram.sendMessage(chatId, text);
+      return;
+    }
+    try {
+      await this.telegram.sendMessage(telegramUserId, text);
+      await this.telegram.sendMessage(chatId, 'Sent your private reconnect link in DM.');
+    } catch {
+      await this.telegram.sendMessage(chatId, 'I can\'t DM you yet. Tap <b>Start private setup</b>, press Start, then run /reconnect here again.', { replyMarkup: this.privateStartKeyboard() });
+    }
+  }
+
   private helpText(chatType: string) {
     if (chatType === 'private') {
       return [
@@ -211,6 +240,7 @@ export class TelegramController {
       'TradePing posts read-only trade alerts to this group.',
       '',
       '/connect — connect a read-only brokerage',
+      '/reconnect — repair a disabled brokerage connection',
       '/privacy — public, normal, private, or off',
       '/trust — what data is bot, user, and group level',
       '/diagnostics — explain what TradePing sees right now',
@@ -233,8 +263,8 @@ export class TelegramController {
     const label: Record<string, string> = {
       ACTIVE: 'connected (read-only)',
       PENDING: 'finishing connection…',
-      ERROR: 'needs reconnect — run /connect',
-      DISABLED: 'disabled by your broker — run /connect',
+      ERROR: 'needs reconnect — run /reconnect',
+      DISABLED: 'disabled by your broker — run /reconnect',
     };
     const lines = connections.map((c) => {
       const name = this.escape(c.brokerageName ?? c.brokerageSlug ?? 'Brokerage');

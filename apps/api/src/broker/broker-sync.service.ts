@@ -65,6 +65,7 @@ export class BrokerSyncService {
       await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'list_connections_failed', message: (err as Error).message } } });
       return { created, alerted };
     }
+    await this.disconnectMissingConnections(userId, connections.map((conn) => conn.id));
 
     for (const conn of connections) {
       try {
@@ -75,6 +76,7 @@ export class BrokerSyncService {
         });
         if (conn.disabled) continue;
         const accounts = await this.snap.listAccounts(user.snaptradeUserId, userSecret, conn.id);
+        await this.disconnectMissingAccounts(dbConn.id, accounts.map((account) => account.id));
         for (const acct of accounts) {
           const acctNameHash = acct.name ? this.crypto.hash(acct.name) : undefined;
           const accountType = this.accountTypeFrom(acct);
@@ -162,7 +164,11 @@ export class BrokerSyncService {
             this.logger.warn(`syncUser(${userId}) account ${acct.id} positions failed: ${(err as Error).message}`);
             await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_positions_failed', metadata: { accountId: acct.id, message: (err as Error).message } } });
           }
-          if (orderFetch.complete) await this.markOrderSynced(userId, dbAcct.id);
+          // recentOrders is a realtime add-on that is not enabled for every
+          // SnapTrade customer. The standard historical endpoint is sufficient
+          // to establish the normal-order baseline; provisional holdings alerts
+          // remain stricter and still require both sources to succeed.
+          if (orderFetch.historicalComplete) await this.markOrderSynced(userId, dbAcct.id);
         }
       } catch (err) {
         // Per-connection isolation: a single failing brokerage must not abort the
@@ -190,7 +196,7 @@ export class BrokerSyncService {
     }
   }
 
-  private async fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; orders: SnapTradeOrder[] }> {
+  private async fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: SnapTradeOrder[] }> {
     const [recent, historical] = await Promise.allSettled([
       this.snap.listRecentAccountOrders(userId, userSecret, accountId),
       this.snap.listAccountOrders(userId, userSecret, accountId, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS')),
@@ -207,11 +213,26 @@ export class BrokerSyncService {
     }
     return {
       complete: failures.length === 0,
+      historicalComplete: historical.status === 'fulfilled',
       orders: [
         ...(recent.status === 'fulfilled' && Array.isArray(recent.value) ? recent.value : []),
         ...(historical.status === 'fulfilled' && Array.isArray(historical.value) ? historical.value : []),
       ],
     };
+  }
+
+  private async disconnectMissingConnections(userId: string, remoteAuthorizationIds: string[]) {
+    await this.prisma.brokerConnection.updateMany({
+      where: { userId, status: { not: 'DISCONNECTED' }, authorizationId: { notIn: remoteAuthorizationIds } },
+      data: { status: 'DISCONNECTED', disabledReason: 'No longer returned by SnapTrade', disconnectedAt: new Date() },
+    });
+  }
+
+  private async disconnectMissingAccounts(connectionId: string, remoteAccountIds: string[]) {
+    await this.prisma.brokerAccount.updateMany({
+      where: { connectionId, status: { not: 'DISCONNECTED' }, providerAccountId: { notIn: remoteAccountIds } },
+      data: { status: 'DISCONNECTED' },
+    });
   }
 
   private async lastSuccessfulSyncAt(userId: string, accountId: string): Promise<Date | null> {
@@ -334,7 +355,7 @@ export class BrokerSyncService {
     return { created, alerted };
   }
 
-  private async hasMatchingConfirmedExecution(accountId: string, groupId: string, trade: { symbol: string; side: 'BUY' | 'SELL'; tradeTime: Date }): Promise<boolean> {
+  private async hasMatchingConfirmedExecution(accountId: string, groupId: string, trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; tradeTime: Date }): Promise<boolean> {
     const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
     return (await this.prisma.tradeEvent.count({
       where: {
@@ -342,6 +363,7 @@ export class BrokerSyncService {
         groupId,
         symbol: trade.symbol,
         side: trade.side,
+        ...(trade.quantity === undefined ? {} : { quantity: trade.quantity }),
         rawType: { not: 'position_delta' },
         rawStatus: { not: 'INFERRED' },
         tradeTime: {

@@ -12,5 +12,6 @@ import { IdempotencySweeperService } from './idempotency-sweeper.service';
   imports: [ConfigModule, BrokerModule, BullModule.registerQueue({ name: 'trade-sync' })],
   providers: [TradeSyncProcessor, AutoSyncService, IdempotencySweeperService, PrismaService],
   controllers: [SchedulerController],
+  exports: [BullModule],
 })
 export class WorkersModule {}

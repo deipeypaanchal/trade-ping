@@ -44,6 +44,7 @@ export class AlertService {
     }
 
     const text = this.render(event, member.privacyLevel);
+    if (!this.isInferred(event) && await this.tryUpgradeProvisional(event, text)) return true;
     try {
       const sent = await this.telegram.sendMessage(event.group.telegramChatId, text);
       await this.prisma.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId, renderedText: text, messageId: sent.message_id ? String(sent.message_id) : undefined, sentAt: new Date() } });
@@ -77,6 +78,52 @@ export class AlertService {
     return this.isInferred(event)
       && event.group?.inferredAlertsEnabled === true
       && supportsProvisionalPositionAlerts(event.account?.connection ?? {});
+  }
+
+  private async tryUpgradeProvisional(event: RenderableTrade, text: string): Promise<boolean> {
+    if (!event.groupId || !event.group || !event.account || !event.quantity) return false;
+    const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
+    const provisional = await this.prisma.tradeEvent.findFirst({
+      where: {
+        userId: event.userId,
+        groupId: event.groupId,
+        accountId: event.account.id,
+        symbol: event.symbol,
+        side: event.side,
+        quantity: event.quantity,
+        rawType: 'position_delta',
+        rawStatus: 'INFERRED',
+        alertStatus: 'SENT',
+        createdAt: {
+          gte: new Date(event.tradeTime.getTime() - windowMs),
+          lte: new Date(event.tradeTime.getTime() + windowMs),
+        },
+        alerts: { some: { messageId: { not: null } } },
+      },
+      include: { alerts: { where: { messageId: { not: null } }, orderBy: { createdAt: 'desc' }, take: 1 } },
+      orderBy: { createdAt: 'desc' },
+    });
+    const provisionalAlert = provisional?.alerts[0];
+    const messageId = provisionalAlert?.messageId ? Number(provisionalAlert.messageId) : NaN;
+    if (!provisional || !provisionalAlert || !Number.isInteger(messageId)) return false;
+    try {
+      await this.telegram.editMessageText(event.group.telegramChatId, messageId, text);
+    } catch (err) {
+      this.logger.warn(`could not upgrade provisional alert ${provisionalAlert.id}: ${(err as Error).message}; sending confirmed alert separately`);
+      return false;
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.alert.update({ where: { id: provisionalAlert.id }, data: { renderedText: text } });
+      await tx.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId!, renderedText: text, messageId: String(messageId), sentAt: new Date() } });
+      await tx.tradeEvent.update({
+        where: { id: event.id },
+        data: { alertStatus: 'SENT', alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
+      });
+      await tx.auditLog.create({
+        data: { userId: event.userId, action: 'provisional_alert_upgraded', metadata: { provisionalTradeEventId: provisional.id, confirmedTradeEventId: event.id, messageId } },
+      });
+    });
+    return true;
   }
 
   private async mark(id: string, status: AlertStatus) {

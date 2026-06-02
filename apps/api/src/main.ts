@@ -21,8 +21,11 @@ async function bootstrap() {
 
   const port = Number(process.env.PORT ?? 3000);
   const server = await app.listen(port);
+  let shuttingDown = false;
 
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.log(`${signal} received; closing HTTP server and shutting down`);
     try {
       server.close();
@@ -39,9 +42,11 @@ async function bootstrap() {
 
   process.on('unhandledRejection', (reason) => {
     logger.error(`unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}`);
+    void shutdown('unhandledRejection');
   });
   process.on('uncaughtException', (err) => {
     logger.error(`uncaughtException: ${err.stack ?? err.message}`);
+    void shutdown('uncaughtException');
   });
 }
 void bootstrap();

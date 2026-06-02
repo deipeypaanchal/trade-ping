@@ -228,10 +228,10 @@ describe('BrokerSyncService position-delta guards', () => {
       null as never,
       config as never,
     ) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; orders: unknown[] }>;
+      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, orders: [] });
+    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: [] });
     expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: 'broker_sync_orders_failed' }),
     }));
@@ -253,9 +253,37 @@ describe('BrokerSyncService position-delta guards', () => {
       null as never,
       config as never,
     ) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; orders: unknown[] }>;
+      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, orders: historical });
+    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: historical });
+  });
+
+  it('preserves the historical watermark when the standard orders endpoint fails', async () => {
+    const prisma = { auditLog: { create: jest.fn() } };
+    const snap = {
+      listRecentAccountOrders: jest.fn().mockResolvedValue([]),
+      listAccountOrders: jest.fn().mockRejectedValue(new Error('historical unavailable')),
+    };
+    const config = { getOrThrow: jest.fn().mockReturnValue(3) };
+    const svc = new BrokerSyncService(prisma as never, null as never, snap as never, null as never, null as never, config as never) as unknown as {
+      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
+    };
+
+    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: false, orders: [] });
+  });
+
+  it('disconnects local connections that SnapTrade no longer returns', async () => {
+    const prisma = { brokerConnection: { updateMany: jest.fn() } };
+    const svc = new BrokerSyncService(prisma as never, null as never, null as never, null as never, null as never, null as never) as unknown as {
+      disconnectMissingConnections(userId: string, remoteAuthorizationIds: string[]): Promise<void>;
+    };
+
+    await svc.disconnectMissingConnections('user-1', ['auth-live']);
+
+    expect(prisma.brokerConnection.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'user-1', status: { not: 'DISCONNECTED' }, authorizationId: { notIn: ['auth-live'] } },
+      data: { status: 'DISCONNECTED', disabledReason: 'No longer returned by SnapTrade', disconnectedAt: expect.any(Date) },
+    });
   });
 });

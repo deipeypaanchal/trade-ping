@@ -2,7 +2,7 @@
 
 ```text
 Telegram group
-  ↓ /connect, /privacy, /sync
+  ↓ /connect, /reconnect, /privacy, /sync
 NestJS API
   ↓
 SnapTrade Connection Portal (read-only)
@@ -22,7 +22,7 @@ Telegram group alert
 
 - `TelegramController`: command router and webhook verification.
 - `SnaptradeService`: all SnapTrade REST calls, isolated for easy SDK replacement if needed.
-- `BrokerOnboardingService`: register SnapTrade user, create read-only portal, refresh/delete connections.
+- `BrokerOnboardingService`: register SnapTrade user, create read-only connect/reconnect portals, refresh/delete connections.
 - `BrokerSyncService`: sync connections/accounts/orders, dedupe, suppress backfill, create trade events.
 - `TradeDetectorService`: normalize executed buy/sell orders for alerts and position snapshots for diagnostics.
 - `AlertService`: render privacy-safe group messages.

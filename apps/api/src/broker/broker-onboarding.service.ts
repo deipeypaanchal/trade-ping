@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../config/prisma.service';
 import { SnaptradeService } from '../snaptrade/snaptrade.service';
 import { CryptoService } from '../security/crypto.service';
@@ -10,6 +10,33 @@ export class BrokerOnboardingService {
   constructor(private prisma: PrismaService, private snap: SnaptradeService, private crypto: CryptoService) {}
 
   async createConnectUrl(userId: string, groupId: string): Promise<string> {
+    const user = await this.registeredUser(userId);
+    const url = await this.snap.connectionPortal(user.snaptradeUserId!, this.crypto.decrypt(user.encryptedUserSecret!), groupId);
+    await this.audit(user.id, 'connection_portal_created', { groupId, sessionId: url.sessionId });
+    if (!url.redirectURI) throw new Error('SnapTrade did not return redirectURI');
+    return url.redirectURI;
+  }
+
+  async createReconnectUrl(userId: string, groupId: string, brokerRaw?: string): Promise<string> {
+    const user = await this.registeredUser(userId);
+    const broken = await this.prisma.brokerConnection.findMany({
+      where: { userId, status: { in: ['DISABLED', 'ERROR'] } },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const broker = brokerRaw?.trim().toLowerCase();
+    const matches = broker
+      ? broken.filter((conn) => [conn.brokerageName, conn.brokerageSlug].some((name) => name?.toLowerCase().includes(broker)))
+      : broken;
+    if (!matches.length) throw new BadRequestException('No disabled brokerage connection matched. Run /status to check your connections.');
+    if (matches.length > 1) throw new BadRequestException('More than one connection needs repair. Run /reconnect followed by the brokerage name, for example /reconnect Robinhood.');
+    const connection = matches[0];
+    const url = await this.snap.connectionPortal(user.snaptradeUserId!, this.crypto.decrypt(user.encryptedUserSecret!), groupId, connection.authorizationId);
+    await this.audit(user.id, 'reconnect_portal_created', { groupId, authorizationId: connection.authorizationId, sessionId: url.sessionId });
+    if (!url.redirectURI) throw new Error('SnapTrade did not return reconnect redirectURI');
+    return url.redirectURI;
+  }
+
+  private async registeredUser(userId: string) {
     let user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     if (!user.snaptradeUserId || !user.encryptedUserSecret) {
       const snapUser = await this.snap.registerUser(user.id);
@@ -19,10 +46,7 @@ export class BrokerOnboardingService {
       }});
       await this.audit(user.id, 'snaptrade_user_registered', {});
     }
-    const url = await this.snap.connectionPortal(user.snaptradeUserId!, this.crypto.decrypt(user.encryptedUserSecret!), groupId);
-    await this.audit(user.id, 'connection_portal_created', { groupId, sessionId: url.sessionId });
-    if (!url.redirectURI) throw new Error('SnapTrade did not return redirectURI');
-    return url.redirectURI;
+    return user;
   }
 
   async refreshConnections(userId: string): Promise<void> {

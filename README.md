@@ -52,13 +52,14 @@ SNAPTRADE_USE_MOCK=true
 7. Set all environment variables from `.env.example`.
 8. Run migrations with `corepack pnpm db:deploy`.
 9. Deploy the API.
-10. Confirm `GET /healthz` returns `{"ok":true}`.
+10. Confirm `GET /healthz` returns `{"ok":true}` with Postgres and Redis checks.
 
 The service registers the Telegram webhook and command menu automatically on boot when `APP_BASE_URL` is public HTTPS and `TELEGRAM_BOT_TOKEN` is real.
 
 ## Bot Commands
 
 - `/connect` - connect a read-only brokerage.
+- `/reconnect [broker]` - repair an existing disabled brokerage connection without creating a duplicate.
 - `/privacy public|normal|private|off` - choose how your alerts appear in this group.
 - `/inferred on|off` - group admin toggle for clearly labeled provisional Robinhood holdings alerts when execution details are unavailable.
 - `/trust` - explain what data is bot-level, user-level, group-level, and per-group.
@@ -85,7 +86,9 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 
 - Robinhood and many brokers can appear close to real time when SnapTrade receives fresh data.
 - Fidelity and IBKR can be delayed up to 24 hours.
+- SnapTrade's realtime `recentOrders` endpoint is an optional capability. TradePing degrades to the standard order feed when it is unavailable.
 - Broker-confirmed executions are the default. Group admins may opt into provisional Robinhood holdings alerts with `/inferred on`; they are labeled as position changes and never presented as confirmed fills.
+- If SnapTrade later reports the matching broker execution, TradePing upgrades that provisional Telegram message inline to the final broker-confirmed receipt.
 - `/diagnostics` is the first support command when a user asks why an alert did not appear. It will distinguish between posted alerts, queued alerts, delayed broker data, historical backfill, and inferred holdings changes that were intentionally skipped.
 - `/status` in the group is the quickest group-level transparency check: it shows which Telegram member linked each broker, account type labels, privacy state, pending alerts, skipped inferred events in the last 24 hours, and worker failures.
 
@@ -110,6 +113,7 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 ## Useful Docs
 
 - [Deployment Guide](docs/DEPLOYMENT.md)
+- [2026-06-02 End-to-End Audit](docs/E2E_AUDIT_2026-06-02.md)
 - [Beta Launch Guide](docs/BETA_LAUNCH.md)
 - [Launch Readiness](docs/LAUNCH_READINESS.md)
 - [Architecture](docs/ARCHITECTURE.md)

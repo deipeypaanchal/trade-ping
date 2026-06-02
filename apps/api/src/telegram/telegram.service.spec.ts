@@ -62,6 +62,24 @@ describe('TelegramService', () => {
     await expect(svc.sendMessage('chat-3', 'hello')).rejects.toBeInstanceOf(TelegramApiError);
   }, 10_000);
 
+  it('treats an already-upgraded Telegram message as an idempotent edit', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: () => Promise.resolve('{"description":"Bad Request: message is not modified"}'),
+    } as unknown as Response);
+    const svc = makeService();
+
+    await expect(svc.editMessageText('chat-4', 42, 'final receipt')).resolves.toBeUndefined();
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      chat_id: 'chat-4',
+      message_id: 42,
+      text: 'final receipt',
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    });
+  });
+
   it('publishes launch-facing command menu entries', async () => {
     fetchMock.mockResolvedValue(okResponse());
     const svc = makeService();
@@ -71,6 +89,7 @@ describe('TelegramService', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.commands.map((cmd: { command: string }) => cmd.command)).toEqual([
       'connect',
+      'reconnect',
       'privacy',
       'trust',
       'diagnostics',
