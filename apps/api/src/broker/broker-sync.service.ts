@@ -10,6 +10,8 @@ import { AlertService } from '../alerts/alert.service';
 import { contractMultiplier } from './asset-type';
 import { shouldSuppressAlert } from './suppress-policy';
 import { scopeKeyToGroup } from './order-key';
+import { supportsProvisionalPositionAlerts } from './broker-freshness';
+import { ALERT } from '../config/constants';
 
 @Injectable()
 export class BrokerSyncService {
@@ -29,6 +31,7 @@ export class BrokerSyncService {
       include: {
         memberships: {
           where: { group: { telegramChatId: { startsWith: '-' } } },
+          include: { group: { select: { inferredAlertsEnabled: true } } },
         },
       },
     });
@@ -152,7 +155,7 @@ export class BrokerSyncService {
           }
           try {
             const positions = await this.snap.listAccountPositions(user.snaptradeUserId, userSecret, acct.id);
-            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true);
+            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true, dbConn, orderFetch.complete);
             created += positionCounts.created;
             alerted += positionCounts.alerted;
           } catch (err) {
@@ -248,9 +251,11 @@ export class BrokerSyncService {
     userId: string,
     dbAccountId: string,
     providerAccountId: string,
-    memberships: { groupId: string }[],
+    memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
     positions: SnapTradePosition[],
     suppressBackfill: boolean,
+    broker: { brokerageName?: string | null; brokerageSlug?: string | null } = {},
+    ordersComplete = false,
   ): Promise<{ created: number; alerted: number }> {
     const current = positions
       .map((position) => this.detector.normalizePosition(position))
@@ -260,9 +265,10 @@ export class BrokerSyncService {
     const previous = this.readPositionSnapshot(state?.value);
     const previousByKey = this.positionMap(previous);
     const positionChangeHealth = this.positionChangeHealth(previousByKey, currentByKey);
+    const hasFreshBaseline = this.positionSnapshotIsFresh(state?.value);
 
     let created = 0;
-    const alerted = 0;
+    let alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
       if (positionChangeHealth === 'PARTIAL_DROP') {
@@ -280,6 +286,11 @@ export class BrokerSyncService {
         if (!norm) continue;
         for (const member of memberships) {
           const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
+          const provisional = member.group?.inferredAlertsEnabled === true
+            && supportsProvisionalPositionAlerts(broker)
+            && ordersComplete
+            && hasFreshBaseline
+            && !(await this.hasMatchingConfirmedExecution(dbAccountId, member.groupId, norm));
           const trade = await this.prisma.tradeEvent.upsert({
             where: { dedupeHash: dedupe },
             update: {},
@@ -301,19 +312,50 @@ export class BrokerSyncService {
               rawId: norm.rawId,
               dedupeHash: dedupe,
               backfillStatus: 'NEW',
-              // Position snapshots are useful diagnostics, but not proof of a
-              // trade. Cached brokers can oscillate between snapshots and
-              // otherwise create false buys/sells in Telegram.
-              alertStatus: 'SKIPPED',
+              // A position snapshot is not proof of a fill. Only an explicitly
+              // opted-in, near-real-time broker may post it as a provisional
+              // holdings change; delayed brokers remain diagnostic-only.
+              alertStatus: provisional ? 'PENDING' : 'SKIPPED',
             },
           });
           if (trade.createdAt.getTime() >= startedAt) created += 1;
+          if (provisional && trade.alertStatus === 'PENDING') {
+            try {
+              if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
+            } catch (e) {
+              this.logger.warn(`provisional alert send threw for trade ${trade.id}: ${(e as Error).message}`);
+            }
+          }
         }
       }
     }
 
     await this.writePositionSnapshot(userId, dbAccountId, current);
     return { created, alerted };
+  }
+
+  private async hasMatchingConfirmedExecution(accountId: string, groupId: string, trade: { symbol: string; side: 'BUY' | 'SELL'; tradeTime: Date }): Promise<boolean> {
+    const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
+    return (await this.prisma.tradeEvent.count({
+      where: {
+        accountId,
+        groupId,
+        symbol: trade.symbol,
+        side: trade.side,
+        rawType: { not: 'position_delta' },
+        rawStatus: { not: 'INFERRED' },
+        tradeTime: {
+          gte: new Date(trade.tradeTime.getTime() - windowMs),
+          lte: new Date(trade.tradeTime.getTime() + windowMs),
+        },
+      },
+    })) > 0;
+  }
+
+  private positionSnapshotIsFresh(value: unknown): boolean {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !('at' in value) || typeof value.at !== 'string') return false;
+    const at = new Date(value.at);
+    return Number.isFinite(at.getTime()) && Date.now() - at.getTime() <= ALERT.PROVISIONAL_BASELINE_MAX_AGE_MS;
   }
 
   private positionChangeHealth(previousByKey: Map<string, PositionSnapshotEntry>, currentByKey: Map<string, PositionSnapshotEntry>): 'OK' | 'PARTIAL_DROP' | 'REHYDRATION' {

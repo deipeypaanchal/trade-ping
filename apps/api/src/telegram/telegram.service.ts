@@ -87,6 +87,24 @@ export class TelegramService implements OnModuleInit {
     if (!res.ok) throw new TelegramApiError(`Telegram setWebhook failed: ${res.status} ${await res.text()}`, res.status);
   }
 
+  async isChatAdmin(chatId: string, userId: string): Promise<boolean> {
+    // Telegram represents commands sent as an anonymous group admin with this
+    // service account. The webhook secret prevents callers from spoofing it.
+    if (userId === '1087968824') return true;
+    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${token}/getChatMember`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, user_id: userId }),
+      });
+      if (!res.ok) return false;
+      const json = await res.json() as { result?: { status?: string } };
+      return json.result?.status === 'creator' || json.result?.status === 'administrator';
+    } catch {
+      return false;
+    }
+  }
+
   /** Publishes the slash-command menu users see in the Telegram UI. */
   async setMyCommands(): Promise<void> {
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
@@ -99,6 +117,7 @@ export class TelegramService implements OnModuleInit {
       { command: 'setup', description: 'Post group onboarding instructions' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'sync', description: 'Manual backup sync' },
+      { command: 'inferred', description: 'Admin: provisional Robinhood holdings alerts' },
       { command: 'disconnect', description: 'Remove your brokerage connections' },
       { command: 'help', description: 'How TradePing works' },
     ];

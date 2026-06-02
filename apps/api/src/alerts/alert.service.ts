@@ -6,6 +6,7 @@ import { ALERT, TIME } from '../config/constants';
 import { AssetType, contractMultiplier, isOptionSymbol } from '../broker/asset-type';
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 import { RenderableTrade } from './alert.types';
+import { supportsProvisionalPositionAlerts } from '../broker/broker-freshness';
 
 @Injectable()
 export class AlertService {
@@ -30,7 +31,7 @@ export class AlertService {
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
-    if (this.isInferred(event)) {
+    if (this.isInferred(event) && !this.isProvisional(event)) {
       this.logger.warn(`skipping inferred trade ${event.id}; holdings changes are diagnostic-only`);
       await this.mark(event.id, 'SKIPPED');
       return false;
@@ -72,6 +73,12 @@ export class AlertService {
     return event.rawType === 'position_delta' || event.rawStatus === 'INFERRED';
   }
 
+  private isProvisional(event: RenderableTrade): boolean {
+    return this.isInferred(event)
+      && event.group?.inferredAlertsEnabled === true
+      && supportsProvisionalPositionAlerts(event.account?.connection ?? {});
+  }
+
   private async mark(id: string, status: AlertStatus) {
     await this.prisma.tradeEvent.update({ where: { id }, data: { alertStatus: status } });
   }
@@ -91,6 +98,7 @@ export class AlertService {
   }
 
   private render(event: RenderableTrade, level: PrivacyLevel): string {
+    if (this.isProvisional(event)) return this.renderProvisional(event, level);
     const emoji = event.side === 'BUY' ? '🟢' : '🔴';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const headline = this.headlineSubject(event);
@@ -107,6 +115,25 @@ export class AlertService {
     lines.push('', `Executed · ${this.formatTimestamp(event.tradeTime, tz)}`);
     if (this.isDelayed(event)) lines.push(`Received · ${this.formatTimestamp(event.createdAt, tz)}`);
     lines.push('', `${this.isDelayed(event) ? '◷' : '✓'} Broker-confirmed execution · Read-only · Not financial advice`);
+    return lines.join('\n');
+  }
+
+  private renderProvisional(event: RenderableTrade, level: PrivacyLevel): string {
+    const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
+    const broker = event.account?.connection?.brokerageName;
+    const direction = event.side === 'BUY' ? 'INCREASE' : 'DECREASE';
+    const lines = [
+      `<b>🟡 POSITION ${direction} · ${this.escape(this.headlineSubject(event))}</b>`,
+      [this.escape(actor), broker ? this.escape(broker) : null].filter(Boolean).join(' · '),
+    ];
+    if (level !== 'PRIVATE' && event.quantity) {
+      const quantity = this.formatQuantity(event.quantity, this.assetType(event));
+      lines.push('', `Observed change · ${event.side === 'BUY' ? '+' : '-'}${this.provisionalQuantity(quantity, event.symbol, this.assetType(event))}`);
+      lines.push('Execution price · Unavailable');
+    }
+    const tz = event.user?.timeZone || TIME.DEFAULT_TIMEZONE;
+    lines.push('', `Detected · ${this.formatTimestamp(event.createdAt, tz)}`);
+    lines.push('', '◷ Provisional holdings change · Waiting for broker execution details');
     return lines.join('\n');
   }
 
@@ -191,6 +218,12 @@ export class AlertService {
     return price
       ? `${quantity} ${unit} @ $${price}${assetType === 'OPTION' ? ' premium' : ''}`
       : `${quantity} ${unit} · Execution price unavailable`;
+  }
+
+  private provisionalQuantity(quantity: string, symbol: string, assetType: AssetType): string {
+    if (assetType === 'OPTION') return `${quantity} ${this.plural(quantity, 'contract')}`;
+    if (assetType === 'CRYPTO') return `${quantity} ${this.escape(symbol)}`;
+    return `${quantity} ${this.plural(quantity, 'share')}`;
   }
 
   private formatQuantity(value: Decimal, assetType: AssetType): string {

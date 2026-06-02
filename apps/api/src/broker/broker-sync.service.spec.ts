@@ -54,6 +54,7 @@ describe('BrokerSyncService position-delta guards', () => {
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
           value: {
+            at: new Date().toISOString(),
             positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
           },
         }),
@@ -94,18 +95,20 @@ describe('BrokerSyncService position-delta guards', () => {
     expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
-  it('keeps position deltas diagnostic-only even if a legacy group flag is enabled', async () => {
+  it('posts an opted-in Robinhood position delta as a provisional alert', async () => {
     const prisma = {
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
           value: {
+            at: new Date().toISOString(),
             positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
           },
         }),
         upsert: jest.fn(),
       },
       tradeEvent: {
-        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
+        count: jest.fn().mockResolvedValue(0),
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
       },
       auditLog: { create: jest.fn() },
     };
@@ -125,17 +128,88 @@ describe('BrokerSyncService position-delta guards', () => {
         memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
         positions: unknown[],
         suppressBackfill: boolean,
+        broker: { brokerageName?: string },
+        ordersComplete: boolean,
       ): Promise<{ created: number; alerted: number }>;
     };
 
     const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
-    ], false);
+    ], false, { brokerageName: 'Robinhood' }, true);
+
+    expect(result).toEqual({ created: 1, alerted: 1 });
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'PENDING' }),
+    }));
+    expect(alerts.sendTradeAlert).toHaveBeenCalledWith('trade-1');
+  });
+
+  it('keeps Fidelity position deltas diagnostic-only even when the group opted in', async () => {
+    const prisma = {
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({ value: { at: new Date().toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: { count: jest.fn().mockResolvedValue(0), upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }) },
+      auditLog: { create: jest.fn() },
+    };
+    const alerts = { sendTradeAlert: jest.fn() };
+    const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+    };
+
+    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Fidelity' }, true);
 
     expect(result).toEqual({ created: 1, alerted: 0 });
-    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
-      create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'SKIPPED' }),
-    }));
+    expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
+  });
+
+  it('does not post a provisional duplicate when a matching confirmed execution exists', async () => {
+    const prisma = {
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({ value: { at: new Date().toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: {
+        count: jest.fn().mockResolvedValue(1),
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
+      },
+      auditLog: { create: jest.fn() },
+    };
+    const alerts = { sendTradeAlert: jest.fn() };
+    const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+    };
+
+    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true);
+
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ alertStatus: 'SKIPPED' }) }));
+    expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
+  });
+
+  it('keeps an opted-in Robinhood delta diagnostic-only when its baseline is stale', async () => {
+    const prisma = {
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({ value: { at: new Date(Date.now() - 60 * 60_000).toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: { count: jest.fn().mockResolvedValue(0), upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }) },
+      auditLog: { create: jest.fn() },
+    };
+    const alerts = { sendTradeAlert: jest.fn() };
+    const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+    };
+
+    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true);
+
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ alertStatus: 'SKIPPED' }) }));
     expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 

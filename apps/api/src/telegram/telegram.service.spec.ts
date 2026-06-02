@@ -78,8 +78,30 @@ describe('TelegramService', () => {
       'setup',
       'status',
       'sync',
+      'inferred',
       'disconnect',
       'help',
     ]);
+  });
+
+  it('recognizes Telegram group administrators', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ result: { status: 'administrator' } }),
+    } as unknown as Response);
+    const svc = makeService();
+
+    await expect(svc.isChatAdmin('-100', '123')).resolves.toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ chat_id: '-100', user_id: '123' });
+  });
+
+  it('fails closed when Telegram admin lookup is unavailable', async () => {
+    fetchMock.mockRejectedValue(new Error('network unavailable'));
+    await expect(makeService().isChatAdmin('-100', '123')).resolves.toBe(false);
+  });
+
+  it('recognizes Telegram anonymous group admins', async () => {
+    await expect(makeService().isChatAdmin('-100', '1087968824')).resolves.toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -56,6 +56,12 @@ export const ALERT = {
   MAX_AGE_MS: 48 * 60 * 60 * 1000,
   /** Show the broker-received timestamp when detection materially trails execution. */
   DELAYED_FEED_THRESHOLD_MS: 15 * 60 * 1000,
+  /** Provisional position alerts require a recently observed baseline so an
+   *  outage recovery cannot replay old holdings drift as fresh activity. */
+  PROVISIONAL_BASELINE_MAX_AGE_MS: 5 * 60 * 1000,
+  /** Position deltas are timestamped when detected, not when filled. Use a
+   *  wider window when checking for an already-known confirmed execution. */
+  PROVISIONAL_EXECUTION_MATCH_WINDOW_MS: 15 * 60 * 1000,
 } as const;
 
 export const AUTO_SYNC = {

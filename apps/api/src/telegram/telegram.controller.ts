@@ -89,7 +89,24 @@ export class TelegramController {
         await this.queue.add('sync-user', { userId: user.id }, { jobId: `manual-sync-user:${user.id}:${windowKey}`, ...JOB_DEFAULTS });
         await this.telegram.sendMessage(chatId, 'Sync queued. TradePing also checks automatically in the background. Alerts appear when your broker reports fresh data; Fidelity/IBKR may be delayed up to 24h.');
       } else if (this.cmd(text, '/inferred')) {
-        await this.telegram.sendMessage(chatId, 'Position-only changes are diagnostic-only. TradePing posts group alerts only when the broker provides an execution record.');
+        if (!group) {
+          await this.telegram.sendMessage(chatId, 'Run /inferred on or /inferred off inside the TradePing group you want to change.');
+          return { ok: true };
+        }
+        const mode = text.split(/\s+/)[1]?.toLowerCase();
+        if (mode !== 'on' && mode !== 'off') {
+          await this.telegram.sendMessage(chatId, 'Use /inferred on or /inferred off. This group-level setting controls clearly labeled provisional Robinhood holdings alerts when execution details are unavailable.');
+          return { ok: true };
+        }
+        if (!(await this.telegram.isChatAdmin(chatId, String(msg.from.id)))) {
+          await this.telegram.sendMessage(chatId, 'Only a Telegram group admin can change provisional holdings alerts.');
+          return { ok: true };
+        }
+        const enabled = mode === 'on';
+        await this.prisma.group.update({ where: { id: group.id }, data: { inferredAlertsEnabled: enabled } });
+        await this.telegram.sendMessage(chatId, enabled
+          ? 'Provisional Robinhood holdings alerts are <b>ON</b> for this group. These alerts are labeled as position changes, not broker-confirmed executions. Fidelity/IBKR remain diagnostic-only.'
+          : 'Provisional holdings alerts are <b>OFF</b> for this group. Position-only changes will stay in diagnostics.');
       } else if (this.cmd(text, '/disconnect')) {
         try {
           const count = await this.onboarding.disconnectAll(user.id);
@@ -200,6 +217,7 @@ export class TelegramController {
       '/groupstatus — group setup and alert health',
       '/setup — post the group onboarding guide again',
       '/status — linked accounts and alert health for this group',
+      '/inferred — admin toggle for provisional Robinhood holdings alerts',
       '/disconnect — remove your connections',
       '',
       'Normal setup: tap Start private setup once, then run /connect here. After that, alerts are automatic.',
@@ -270,7 +288,7 @@ export class TelegramController {
       '',
       'Each member connects their own read-only brokerage. This group only receives alerts for members who connected here.',
       'Alerts depend on broker freshness. Fidelity/IBKR may be delayed up to 24h.',
-      'Position-only changes stay in diagnostics and never post as trade alerts.',
+      'Position-only changes stay in diagnostics unless a group admin enables clearly labeled provisional Robinhood alerts with /inferred on.',
       '',
       'Run /trust to see what is bot-level, user-level, and group-level.',
     ].join('\n');
@@ -288,7 +306,7 @@ export class TelegramController {
       '',
       '<b>Group level</b>',
       'The Telegram group destination and which connected members can post alerts here.',
-      'Position-only holdings changes are diagnostic-only. Group alerts require a broker execution record.',
+      'Group alerts use broker execution records by default. A group admin can opt into clearly labeled provisional Robinhood holdings alerts with /inferred on. Fidelity/IBKR remain diagnostic-only.',
       '',
       '<b>Per-user per-group level</b>',
       '/privacy controls only your alerts in this group. You can be public here, private elsewhere, or off in another group.',
@@ -353,7 +371,8 @@ export class TelegramController {
   }
 
   private async groupStatusText(groupId: string) {
-    const [members, latest, pendingAlerts, skippedInferred, failedJobs] = await Promise.all([
+    const [group, members, latest, pendingAlerts, skippedInferred, failedJobs] = await Promise.all([
+      this.prisma.group.findUniqueOrThrow({ where: { id: groupId }, select: { inferredAlertsEnabled: true } }),
       this.prisma.groupMember.findMany({
         where: { groupId },
         orderBy: { createdAt: 'asc' },
@@ -412,7 +431,7 @@ export class TelegramController {
       `Known members: ${members.length}`,
       `Connected members: ${connectedMembers}`,
       `Members with alerts on: ${alertsOn}`,
-      'Position-only changes: diagnostics only',
+      `Provisional Robinhood holdings alerts: ${group.inferredAlertsEnabled ? 'on' : 'off'}`,
       `Pending alerts: ${pendingAlerts}`,
       `Inferred trades skipped in last 24h: ${skippedInferred}`,
       `Worker failures in last 24h: ${failedJobs}`,
@@ -456,6 +475,7 @@ export class TelegramController {
     },
     member: { privacyLevel: string; alertsEnabled: boolean } | null,
   ): string {
+    if (trade.alertStatus === 'SENT' && (trade.rawType === 'position_delta' || trade.rawStatus === 'INFERRED')) return 'Alert result: posted as a provisional holdings change because this group opted in.';
     if (trade.alertStatus === 'SENT') return 'Alert result: posted to the group.';
     if (trade.alertStatus === 'PENDING') return 'Alert result: queued for delivery.';
     if (trade.alertStatus === 'FAILED') return 'Alert result: delivery failed and will retry if still inside the retry window.';

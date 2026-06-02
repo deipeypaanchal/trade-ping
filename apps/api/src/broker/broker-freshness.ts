@@ -21,6 +21,14 @@ export function hasDelayedBroker(brokers: BrokerRef[]): boolean {
   });
 }
 
+/** Position snapshots are only eligible for provisional alerts on brokers whose
+ * holdings are expected to update near real time. Keep this allow-list narrow:
+ * a delayed or cached broker can otherwise replay stale portfolio changes. */
+export function supportsProvisionalPositionAlerts(broker: BrokerRef): boolean {
+  const raw = [broker.brokerageName, broker.brokerageSlug].filter(Boolean).join(' ');
+  return /\brobinhood\b/i.test(raw);
+}
+
 export function brokerFreshnessSummary(brokers: BrokerRef[]): string {
   if (!brokers.length) return 'Broker freshness appears after you connect.';
   return hasDelayedBroker(brokers)

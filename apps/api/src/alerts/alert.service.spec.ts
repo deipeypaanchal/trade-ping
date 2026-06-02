@@ -113,7 +113,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
   });
 
-  it('does not send inferred alerts even if a legacy group flag is enabled', async () => {
+  it('sends an opted-in Robinhood position delta as a clearly labeled provisional alert', async () => {
     const recent = new Date(Date.now() - 5 * 60_000);
     const event = makeEvent({
       rawType: 'position_delta',
@@ -123,13 +123,35 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       createdAt: recent,
       group: { telegramChatId: '-100', inferredAlertsEnabled: true },
     });
-    const sendImpl = jest.fn();
-    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     const ok = await svc.sendTradeAlert('trade-1');
 
-    expect(ok).toBe(false);
+    expect(ok).toBe(true);
+    expect(sentTexts[0]).toContain('<b>🟡 POSITION INCREASE · AAPL</b>');
+    expect(sentTexts[0]).toContain('Observed change · +10 shares');
+    expect(sentTexts[0]).toContain('Execution price · Unavailable');
+    expect(sentTexts[0]).toContain('◷ Provisional holdings change · Waiting for broker execution details');
+    expect(sentTexts[0]).not.toContain('Broker-confirmed');
+  });
+
+  it('does not send inferred Fidelity alerts even if the group flag is enabled', async () => {
+    const recent = new Date(Date.now() - 5 * 60_000);
+    const event = makeEvent({
+      rawType: 'position_delta',
+      rawStatus: 'INFERRED',
+      priceSource: 'POSITION_COST_BASIS',
+      tradeTime: recent,
+      createdAt: recent,
+      group: { telegramChatId: '-100', inferredAlertsEnabled: true },
+      account: { accountType: 'INDIVIDUAL', connection: { brokerageName: 'Fidelity' } },
+    });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    expect(await svc.sendTradeAlert('trade-1')).toBe(false);
     expect(sendImpl).not.toHaveBeenCalled();
   });
 

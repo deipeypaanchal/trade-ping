@@ -70,7 +70,7 @@ describe('TelegramController', () => {
     expect(text).toContain('Deipey Paanchal: Robinhood');
     expect(text).toContain('accounts: Individual');
     expect(text).toContain('alerts normal');
-    expect(text).toContain('Position-only changes: diagnostics only');
+    expect(text).toContain('Provisional Robinhood holdings alerts: off');
     expect(text).toContain('Owner means the Telegram member');
   });
 
@@ -136,7 +136,7 @@ describe('TelegramController', () => {
     expect(text).toContain('holdings change');
   });
 
-  it('explains that inferred alerts are diagnostic-only', async () => {
+  it('lets a group admin enable provisional Robinhood holdings alerts', async () => {
     const prisma = {
       user: { upsert: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Deipey Paanchal' }) },
       group: {
@@ -150,6 +150,7 @@ describe('TelegramController', () => {
     } as unknown as PrismaService;
     const telegram = {
       sendMessage: jest.fn().mockResolvedValue({ message_id: 1 }),
+      isChatAdmin: jest.fn().mockResolvedValue(true),
     } as unknown as TelegramService;
     const controller = new TelegramController(
       prisma,
@@ -169,7 +170,33 @@ describe('TelegramController', () => {
       },
     }, 'secret');
 
+    expect(prisma.group.update).toHaveBeenCalledWith({ where: { id: 'group-1' }, data: { inferredAlertsEnabled: true } });
+    expect(telegram.sendMessage).toHaveBeenCalledWith('-100', expect.stringContaining('Provisional Robinhood holdings alerts are <b>ON</b>'));
+  });
+
+  it('does not let a regular group member enable provisional alerts', async () => {
+    const prisma = {
+      user: { upsert: jest.fn().mockResolvedValue({ id: 'user-1', displayName: 'Member' }) },
+      group: { upsert: jest.fn().mockResolvedValue({ id: 'group-1' }), update: jest.fn() },
+      groupMember: { upsert: jest.fn().mockResolvedValue({}) },
+      auditLog: { create: jest.fn() },
+    } as unknown as PrismaService;
+    const telegram = {
+      sendMessage: jest.fn().mockResolvedValue({ message_id: 1 }),
+      isChatAdmin: jest.fn().mockResolvedValue(false),
+    } as unknown as TelegramService;
+    const controller = new TelegramController(prisma, telegram, {} as BrokerOnboardingService, {} as PrivacyService, new ConfigService({ TELEGRAM_WEBHOOK_SECRET: 'secret' }), {} as Queue);
+
+    await controller.webhook({
+      message: {
+        message_id: 1,
+        chat: { id: -100, type: 'supergroup', title: 'High Risk High Rewards' },
+        from: { id: 456, first_name: 'Member' },
+        text: '/inferred on',
+      },
+    }, 'secret');
+
     expect(prisma.group.update).not.toHaveBeenCalled();
-    expect(telegram.sendMessage).toHaveBeenCalledWith('-100', expect.stringContaining('diagnostic-only'));
+    expect(telegram.sendMessage).toHaveBeenCalledWith('-100', expect.stringContaining('Only a Telegram group admin'));
   });
 });

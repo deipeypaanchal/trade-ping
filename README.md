@@ -60,6 +60,7 @@ The service registers the Telegram webhook and command menu automatically on boo
 
 - `/connect` - connect a read-only brokerage.
 - `/privacy public|normal|private|off` - choose how your alerts appear in this group.
+- `/inferred on|off` - group admin toggle for clearly labeled provisional Robinhood holdings alerts when execution details are unavailable.
 - `/trust` - explain what data is bot-level, user-level, group-level, and per-group.
 - `/diagnostics` - explain latest sync, broker freshness, latest detected trade, and why it did or did not alert.
 - `/groupstatus` - show group setup and alert health without exposing account names or numbers.
@@ -84,6 +85,7 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 
 - Robinhood and many brokers can appear close to real time when SnapTrade receives fresh data.
 - Fidelity and IBKR can be delayed up to 24 hours.
+- Broker-confirmed executions are the default. Group admins may opt into provisional Robinhood holdings alerts with `/inferred on`; they are labeled as position changes and never presented as confirmed fills.
 - `/diagnostics` is the first support command when a user asks why an alert did not appear. It will distinguish between posted alerts, queued alerts, delayed broker data, historical backfill, and inferred holdings changes that were intentionally skipped.
 - `/status` in the group is the quickest group-level transparency check: it shows which Telegram member linked each broker, account type labels, privacy state, pending alerts, skipped inferred events in the last 24 hours, and worker failures.
 
@@ -92,7 +94,7 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 - **Bot level:** shared infrastructure and credentials: Telegram bot, SnapTrade API, hosting, Postgres, Redis, workers, and alert logic.
 - **User level:** Telegram identity, encrypted SnapTrade user secret, connected brokers/accounts, and detected trades/positions.
 - **Group level:** the Telegram group destination and the connected members in that group.
-- **Position-only diagnostics:** holdings changes are recorded for support visibility but never posted as trade alerts.
+- **Position-only fallback:** holdings changes are recorded for support visibility. They post only as clearly labeled provisional Robinhood alerts when a group admin opts in with `/inferred on`; delayed brokers remain diagnostic-only.
 - **Per-user per-group level:** `/privacy` controls only one member's alerts in one group.
 
 ## Security Posture
