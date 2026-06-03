@@ -87,8 +87,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL</b>');
-    expect(sentTexts[0]).toContain('@trader · Robinhood');
+    expect(sentTexts[0]).toContain('<b>🟢 @trader bought AAPL</b>');
+    expect(sentTexts[0]).toContain('Robinhood · Broker-confirmed');
     expect(sentTexts[0]).toContain('10 shares @ $150.25');
     expect(sentTexts[0]).toContain('Total debit · $1,502.50');
   });
@@ -115,11 +115,11 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
 
-    expect(telegram.editMessageText).toHaveBeenCalledWith('-100', 42, expect.stringContaining('<b>🟢 BUY · AAPL</b>'));
+    expect(telegram.editMessageText).toHaveBeenCalledWith('-100', 42, expect.stringContaining('<b>🟢 @trader bought AAPL</b>'));
     expect(sendImpl).not.toHaveBeenCalled();
-    expect(prisma.alert.update).toHaveBeenCalledWith({ where: { id: 'provisional-alert-1' }, data: { renderedText: expect.stringContaining('Broker-confirmed execution') } });
+    expect(prisma.alert.update).toHaveBeenCalledWith({ where: { id: 'provisional-alert-1' }, data: { renderedText: expect.stringContaining('Broker-confirmed alert') } });
     expect(prisma.alert.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ tradeEventId: 'trade-1', renderedText: expect.stringContaining('Broker-confirmed execution'), messageId: '42' }),
+      data: expect.objectContaining({ tradeEventId: 'trade-1', renderedText: expect.stringContaining('Broker-confirmed alert'), messageId: '42' }),
     });
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {
@@ -160,7 +160,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     const ok = await svc.sendTradeAlert('trade-1');
 
     expect(ok).toBe(true);
-    expect(sentTexts[0]).toContain('<b>🟡 POSITION INCREASE · AAPL</b>');
+    expect(sentTexts[0]).toContain('<b>🟡 @trader increased AAPL</b>');
+    expect(sentTexts[0]).toContain('Robinhood · Provisional position increase');
     expect(sentTexts[0]).toContain('Observed change · +10 shares');
     expect(sentTexts[0]).toContain('Execution price · Unavailable');
     expect(sentTexts[0]).toContain('◷ Provisional holdings change · Waiting for broker execution details');
@@ -225,7 +226,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL $150.00 Call</b>');
+    expect(sentTexts[0]).toContain('<b>🟢 @trader bought AAPL $150.00 Call</b>');
     expect(sentTexts[0]).toContain('Expires · Mar 21, 2025');
     expect(sentTexts[0]).toContain('1 contract @ $5.23 premium');
     expect(sentTexts[0]).toContain('Total debit · $523.00');
@@ -249,8 +250,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await svc.sendTradeAlert('trade-1');
 
-    expect(sentTexts[0]).toContain('<b>🟢 BUY · AAPL</b>');
-    expect(sentTexts[0]).toContain('Anonymous member · Robinhood');
+    expect(sentTexts[0]).toContain('<b>🟢 Anonymous member bought AAPL</b>');
+    expect(sentTexts[0]).toContain('Robinhood · Broker-confirmed');
     expect(sentTexts[0]).not.toContain('shares @');
     expect(sentTexts[0]).not.toContain('Total debit');
   });
@@ -301,7 +302,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       minute: '2-digit',
       timeZoneName: 'short',
     })}`);
-    expect(sentTexts[0]).toContain('◷ Broker-confirmed execution · Read-only · Not financial advice');
+    expect(sentTexts[0]).toContain('◷ Delayed broker-confirmed alert · Read-only · Not financial advice');
   });
 
   it('formats crypto with useful precision and its ticker as the unit', async () => {

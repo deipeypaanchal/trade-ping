@@ -148,11 +148,12 @@ export class AlertService {
     if (this.isProvisional(event)) return this.renderProvisional(event, level);
     const emoji = event.side === 'BUY' ? '🟢' : '🔴';
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
+    const verb = event.side === 'BUY' ? 'bought' : 'sold';
     const headline = this.headlineSubject(event);
     const broker = event.account?.connection?.brokerageName;
     const lines = [
-      `<b>${emoji} ${event.side} · ${this.escape(headline)}</b>`,
-      [this.escape(actor), broker ? this.escape(broker) : null].filter(Boolean).join(' · '),
+      `<b>${emoji} ${this.escape(actor)} ${verb} ${this.escape(headline)}</b>`,
+      [broker ? this.escape(broker) : null, 'Broker-confirmed'].filter(Boolean).join(' · '),
     ];
     if (level !== 'PRIVATE') {
       const details = this.tradeDetails(event, level);
@@ -161,7 +162,7 @@ export class AlertService {
     const tz = event.user?.timeZone || TIME.DEFAULT_TIMEZONE;
     lines.push('', `Executed · ${this.formatTimestamp(event.tradeTime, tz)}`);
     if (this.isDelayed(event)) lines.push(`Received · ${this.formatTimestamp(event.createdAt, tz)}`);
-    lines.push('', `${this.isDelayed(event) ? '◷' : '✓'} Broker-confirmed execution · Read-only · Not financial advice`);
+    lines.push('', `${this.isDelayed(event) ? '◷ Delayed broker-confirmed alert' : '✓ Broker-confirmed alert'} · Read-only · Not financial advice`);
     return lines.join('\n');
   }
 
@@ -169,9 +170,10 @@ export class AlertService {
     const actor = level === 'PRIVATE' ? 'Anonymous member' : event.user.displayName;
     const broker = event.account?.connection?.brokerageName;
     const direction = event.side === 'BUY' ? 'INCREASE' : 'DECREASE';
+    const verb = event.side === 'BUY' ? 'increased' : 'decreased';
     const lines = [
-      `<b>🟡 POSITION ${direction} · ${this.escape(this.headlineSubject(event))}</b>`,
-      [this.escape(actor), broker ? this.escape(broker) : null].filter(Boolean).join(' · '),
+      `<b>🟡 ${this.escape(actor)} ${verb} ${this.escape(this.headlineSubject(event))}</b>`,
+      [broker ? this.escape(broker) : null, `Provisional position ${direction.toLowerCase()}`].filter(Boolean).join(' · '),
     ];
     if (level !== 'PRIVATE' && event.quantity) {
       const quantity = this.formatQuantity(event.quantity, this.assetType(event));
