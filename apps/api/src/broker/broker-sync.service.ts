@@ -12,6 +12,7 @@ import { shouldSuppressAlert } from './suppress-policy';
 import { scopeKeyToGroup } from './order-key';
 import { supportsProvisionalPositionAlerts } from './broker-freshness';
 import { ALERT } from '../config/constants';
+import { isExcludedBotSymbol } from './excluded-symbols';
 
 @Injectable()
 export class BrokerSyncService {
@@ -420,7 +421,7 @@ export class BrokerSyncService {
       if (!entry || typeof entry !== 'object') return [];
       const symbol = 'symbol' in entry && typeof entry.symbol === 'string' ? entry.symbol : null;
       const quantity = 'quantity' in entry && typeof entry.quantity === 'number' ? entry.quantity : null;
-      if (!symbol || quantity === null) return [];
+      if (!symbol || quantity === null || isExcludedBotSymbol(symbol)) return [];
       return [{
         symbol,
         symbolId: 'symbolId' in entry && typeof entry.symbolId === 'string' ? entry.symbolId : undefined,

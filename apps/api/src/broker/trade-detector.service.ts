@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { SnapTradeOrder, SnapTradePosition } from '../snaptrade/snaptrade.types';
 import { computeOrderKey, computePositionDeltaKey } from './order-key';
 import { AssetType, inferAssetType } from './asset-type';
+import { isExcludedBotSymbol } from './excluded-symbols';
 
 export type NormalizedTrade = {
   symbol: string;
@@ -68,6 +69,7 @@ export class TradeDetectorService {
     const timestamp = order.time_executed ?? order.filled_date ?? order.execution_time ?? order.time_placed ?? order.trade_date ?? order.updated_date ?? order.time_updated ?? order.created_date ?? new Date().toISOString();
     const providerOrderId = order.brokerage_order_id ?? order.id;
     const symbolUpper = String(symbol).toUpperCase();
+    if (isExcludedBotSymbol(symbolUpper)) return null;
     // rawId is forensic only — keep it stable for grouping but do NOT use it
     // for identity. Identity comes from computeOrderKey().
     const rawId = providerOrderId ?? `${symbolUpper}-${side}-${timestamp}`;
@@ -109,6 +111,8 @@ export class TradeDetectorService {
   normalizePosition(position: SnapTradePosition): PositionSnapshotEntry | null {
     const symbol = this.extractPositionSymbol(position);
     if (!symbol) return null;
+    const symbolUpper = symbol.symbol.toUpperCase();
+    if (isExcludedBotSymbol(symbolUpper)) return null;
     const quantity = this.positionQuantity(position);
     if (quantity === undefined || quantity < 0) return null;
     const costBasis = this.toNumber(position.average_purchase_price ?? position.cost_basis);
@@ -117,7 +121,7 @@ export class TradeDetectorService {
     const openPnl = this.toNumber(position.open_pnl);
     const currency = typeof position.currency === 'string' ? position.currency : position.currency?.code ?? this.positionInstrumentCurrency(position) ?? position.symbol?.currency?.code;
     return {
-      symbol: symbol.symbol.toUpperCase(),
+      symbol: symbolUpper,
       symbolId: symbol.id,
       quantity,
       price,
@@ -140,6 +144,7 @@ export class TradeDetectorService {
     if (previousQuantity === currentQuantity) return null;
     const source = current ?? previous;
     if (!source) return null;
+    if (isExcludedBotSymbol(source.symbol)) return null;
     const side = currentQuantity > previousQuantity ? 'BUY' : 'SELL';
     const symbolId = source.symbolId ?? source.symbol;
     const rawId = `position-delta:${accountId}:${symbolId}:${previousQuantity}->${currentQuantity}`;

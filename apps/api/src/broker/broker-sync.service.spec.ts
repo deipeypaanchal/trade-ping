@@ -49,6 +49,19 @@ describe('BrokerSyncService position-delta guards', () => {
     expect(svc.positionChangeHealth(previous, current)).toBe('OK');
   });
 
+  it('filters non-alertable money market sweep positions from stored snapshots', () => {
+    const svc = new BrokerSyncService(null as never, null as never, null as never, null as never, null as never, null as never) as unknown as {
+      readPositionSnapshot(value: unknown): PositionSnapshotEntry[];
+    };
+
+    expect(svc.readPositionSnapshot({
+      positions: [
+        { symbol: 'FDRXX', symbolId: 'sym-fdrxx', quantity: 100, price: 1, currency: 'USD' },
+        { symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 2, price: 300, currency: 'USD' },
+      ],
+    })).toEqual([{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 2, price: 300, marketPrice: undefined, openPnl: undefined, currency: 'USD' }]);
+  });
+
   it('records position deltas without sending group alerts', async () => {
     const prisma = {
       syncState: {

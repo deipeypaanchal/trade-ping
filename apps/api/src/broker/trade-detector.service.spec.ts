@@ -13,6 +13,10 @@ describe('TradeDetectorService', () => {
     const out = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'CANCELED', action: 'BUY', universal_symbol: { symbol: 'AAPL' } });
     expect(out).toBeNull();
   });
+  it('ignores non-alertable money market sweep orders', () => {
+    const out = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'BUY', universal_symbol: { symbol: 'FDRXX' }, filled_quantity: 3, average_fill_price: 1 });
+    expect(out).toBeNull();
+  });
   it('uses time_placed when filled_date is absent (Robinhood shape)', () => {
     const out = svc.normalizeOrder('u1', 'a1', { brokerage_order_id: 'o1', status: 'EXECUTED', action: 'SELL', universal_symbol: { symbol: 'TTWO' }, filled_quantity: 5, time_placed: '2026-05-18T17:22:58Z' });
     expect(out?.tradeTime.toISOString()).toBe('2026-05-18T17:22:58.000Z');
@@ -40,6 +44,16 @@ describe('TradeDetectorService', () => {
     });
 
     expect(out).toEqual({ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1.25, price: 299.95, marketPrice: 301.1, openPnl: undefined, currency: 'USD' });
+  });
+
+  it('ignores non-alertable money market sweep positions', () => {
+    const out = svc.normalizePosition({
+      instrument: { id: 'sym-fdrxx', symbol: 'FDRXX', currency: 'USD' },
+      units: 10,
+      price: 1,
+    });
+
+    expect(out).toBeNull();
   });
 
   it('combines whole and fractional position units when SnapTrade separates them', () => {
@@ -75,6 +89,14 @@ describe('TradeDetectorService', () => {
     expect(first?.priceSource).toBe('POSITION_COST_BASIS');
     expect(first?.rawStatus).toBe('INFERRED');
     expect(second?.dedupeHash).toBe(first?.dedupeHash);
+  });
+
+  it('ignores non-alertable money market sweep position deltas', () => {
+    const previous = { symbol: 'FDRXX', symbolId: 'sym-fdrxx', quantity: 100, price: 1, currency: 'USD' };
+    const current = { symbol: 'FDRXX', symbolId: 'sym-fdrxx', quantity: 200, price: 1, currency: 'USD' };
+    const out = svc.normalizePositionDelta('u1', 'a1', previous, current, new Date('2026-05-21T08:20:00Z'));
+
+    expect(out).toBeNull();
   });
 
   it('NEVER renders order.price (limit) as a fill price', () => {
