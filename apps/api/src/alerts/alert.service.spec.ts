@@ -60,6 +60,18 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     return { svc: new AlertService(prisma, telegram), prisma, telegram, sentTexts };
   }
 
+  it('does not resend events that are no longer pending', async () => {
+    const event = makeEvent({ alertStatus: 'SENT' });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.update).not.toHaveBeenCalled();
+  });
+
   it('escapes HTML special characters including quotes', async () => {
     const event = makeEvent({ symbol: 'A<B>&"C\'' });
     const { svc, prisma, sentTexts } = makeService();

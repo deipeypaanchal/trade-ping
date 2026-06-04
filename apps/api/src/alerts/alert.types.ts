@@ -27,6 +27,7 @@ export type RenderableTrade = {
   profitLossPct: Decimal | null;
   tradeTime: Date;
   createdAt: Date;
+  alertStatus: string;
   alertAttempts: number | null;
   rawType: string | null;
   rawStatus: string | null;

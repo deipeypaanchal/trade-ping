@@ -28,6 +28,10 @@ export class AlertService {
       where: { id: tradeEventId },
       include: { user: true, group: true, account: { include: { connection: true } } },
     })) as unknown as RenderableTrade;
+    if (event.alertStatus !== 'PENDING') {
+      this.logger.log(`skipping trade ${event.id}; alert status is already ${event.alertStatus}`);
+      return false;
+    }
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
     const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
     if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
