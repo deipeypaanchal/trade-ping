@@ -36,6 +36,13 @@ describe('TelegramController', () => {
       },
       tradeEvent: {
         findFirst: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            accountId: 'acct-1',
+            createdAt: new Date(Date.now() - 30_000),
+            tradeTime: new Date(Date.now() - 42_000),
+          },
+        ]),
         count: jest.fn().mockResolvedValue(0),
       },
       auditLog: {
@@ -70,6 +77,7 @@ describe('TelegramController', () => {
     expect(text).toContain('Deipey Paanchal: Robinhood');
     expect(text).toContain('accounts: Individual');
     expect(text).toContain('alerts normal');
+    expect(text).toContain('execution feed Individual confirmed just now; broker lag 12s');
     expect(text).toContain('Provisional Robinhood holdings alerts: off');
     expect(text).toContain('Owner means the Telegram member');
   });
@@ -105,6 +113,13 @@ describe('TelegramController', () => {
           priceSource: 'POSITION_COST_BASIS',
           account: { connection: { brokerageName: 'Robinhood', brokerageSlug: 'robinhood' } },
         }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            accountId: 'acct-1',
+            createdAt: new Date(Date.now() - 2 * 60_000),
+            tradeTime: new Date(Date.now() - 17 * 60_000),
+          },
+        ]),
       },
       auditLog: { create: jest.fn() },
       syncState: {
@@ -132,6 +147,7 @@ describe('TelegramController', () => {
 
     const text = (telegram.sendMessage as jest.Mock).mock.calls[0][1] as string;
     expect(text).toContain('Latest detected here: SELL USDC via Robinhood');
+    expect(text).toContain('execution feed Individual confirmed 2m ago; broker lag 15m');
     expect(text).toContain('Position-only changes are diagnostic-only');
     expect(text).toContain('holdings change');
   });

@@ -91,7 +91,8 @@ export class TelegramController {
           orderBy: { updatedAt: 'desc' },
         });
         const syncStates = connections.length ? await this.syncStatesFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, Date>();
-        await this.telegram.sendMessage(chatId, this.statusText(connections, syncStates));
+        const executionFreshness = connections.length ? await this.executionFreshnessFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, { createdAt: Date; tradeTime: Date }>();
+        await this.telegram.sendMessage(chatId, this.statusText(connections, syncStates, executionFreshness));
       } else if (this.cmd(text, '/sync')) {
         const windowKey = Math.floor(Date.now() / SYNC.FANOUT_DEDUPE_WINDOW_MS);
         await this.queue.add('sync-user', { userId: user.id }, { jobId: `manual-sync-user:${user.id}:${windowKey}`, ...JOB_DEFAULTS });
@@ -258,6 +259,7 @@ export class TelegramController {
   private statusText(
     connections: Array<{ status: string; brokerageName: string | null; brokerageSlug: string | null; accounts?: Array<{ id: string; accountType: string | null }> }>,
     syncStates: Map<string, Date>,
+    executionFreshness = new Map<string, { createdAt: Date; tradeTime: Date }>(),
   ) {
     if (!connections.length) return 'No brokerage connected. Run /connect to get started.';
     const label: Record<string, string> = {
@@ -275,7 +277,9 @@ export class TelegramController {
       const suffix = accountTypes.length ? `; accounts: ${accountTypes.join(', ')}` : '';
       const lastChecked = this.lastChecked(c.accounts ?? [], syncStates);
       const checked = lastChecked ? `; last checked ${this.relativeTime(lastChecked)}` : '';
-      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}${suffix}${checked}\n${brokerFreshnessNote(c)}`;
+      const executionFeed = this.executionFeedSummary(c.accounts ?? [], executionFreshness);
+      const feed = executionFeed ? `\nExecution feed: ${executionFeed}` : '';
+      return `${name} — ${label[c.status] ?? c.status.toLowerCase()}${suffix}${checked}${feed}\n${brokerFreshnessNote(c)}`;
     });
     return ['Your connections:', ...lines].join('\n\n');
   }
@@ -356,6 +360,7 @@ export class TelegramController {
       orderBy: { updatedAt: 'desc' },
     });
     const syncStates = connections.length ? await this.syncStatesFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, Date>();
+    const executionFreshness = connections.length ? await this.executionFreshnessFor(connections.flatMap((c) => c.accounts.map((a) => a.id))) : new Map<string, { createdAt: Date; tradeTime: Date }>();
     const latest = await this.prisma.tradeEvent.findFirst({
       where: { userId, ...(groupId ? { groupId } : {}) },
       orderBy: { tradeTime: 'desc' },
@@ -387,7 +392,8 @@ export class TelegramController {
         return label ? [label] : [];
       }))];
       const lastChecked = this.lastChecked(conn.accounts, syncStates);
-      lines.push(`${this.escape(conn.brokerageName ?? conn.brokerageSlug ?? 'Brokerage')}: ${conn.status.toLowerCase()}${accountTypes.length ? `; ${accountTypes.join(', ')}` : ''}${lastChecked ? `; checked ${this.relativeTime(lastChecked)}` : ''}.`);
+      const executionFeed = this.executionFeedSummary(conn.accounts, executionFreshness);
+      lines.push(`${this.escape(conn.brokerageName ?? conn.brokerageSlug ?? 'Brokerage')}: ${conn.status.toLowerCase()}${accountTypes.length ? `; ${accountTypes.join(', ')}` : ''}${lastChecked ? `; checked ${this.relativeTime(lastChecked)}` : ''}${executionFeed ? `; execution feed ${executionFeed}` : ''}.`);
     }
     if (latest) {
       const broker = latest.account?.connection?.brokerageName ?? latest.account?.connection?.brokerageSlug ?? 'broker';
@@ -455,6 +461,9 @@ export class TelegramController {
     const syncStates = brokerRefs.length
       ? await this.syncStatesFor(members.flatMap((member) => member.user.brokerConnections.flatMap((conn) => conn.accounts.map((account) => account.id))))
       : new Map<string, Date>();
+    const executionFreshness = brokerRefs.length
+      ? await this.executionFreshnessFor(members.flatMap((member) => member.user.brokerConnections.flatMap((conn) => conn.accounts.map((account) => account.id))))
+      : new Map<string, { createdAt: Date; tradeTime: Date }>();
     const delayed = brokerRefs.some((broker) => brokerFreshnessNote(broker).includes('delayed'));
     const lines = [
       '<b>TradePing group status</b>',
@@ -485,8 +494,10 @@ export class TelegramController {
         const accounts = accountTypes.length ? `; accounts: ${accountTypes.join(', ')}` : '; accounts: connected';
         const lastChecked = this.lastChecked(conn.accounts, syncStates);
         const checked = lastChecked ? `; last checked ${this.relativeTime(lastChecked)}` : '';
+        const executionFeed = this.executionFeedSummary(conn.accounts, executionFreshness);
+        const feed = executionFeed ? `; execution feed ${executionFeed}` : '';
         const alertState = member.alertsEnabled && member.privacyLevel !== 'OFF' ? member.privacyLevel.toLowerCase() : 'off';
-        return `${owner}: ${broker} — ${conn.status.toLowerCase()}${accounts}; alerts ${alertState}${checked}.`;
+        return `${owner}: ${broker} — ${conn.status.toLowerCase()}${accounts}; alerts ${alertState}${checked}${feed}.`;
       });
     });
     lines.push('', '<b>Linked accounts in this group</b>', ...roster);
@@ -533,6 +544,36 @@ export class TelegramController {
     return byAccount;
   }
 
+  private async executionFreshnessFor(accountIds: string[]): Promise<Map<string, { createdAt: Date; tradeTime: Date }>> {
+    if (!accountIds.length) return new Map();
+    const events = await this.prisma.tradeEvent.findMany({
+      where: {
+        accountId: { in: accountIds },
+        NOT: [{ rawType: 'position_delta' }, { rawStatus: 'INFERRED' }],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: Math.max(accountIds.length * 4, 20),
+      select: { accountId: true, createdAt: true, tradeTime: true },
+    });
+    const byAccount = new Map<string, { createdAt: Date; tradeTime: Date }>();
+    for (const event of events) {
+      if (!event.accountId || byAccount.has(event.accountId)) continue;
+      byAccount.set(event.accountId, { createdAt: event.createdAt, tradeTime: event.tradeTime });
+    }
+    return byAccount;
+  }
+
+  private executionFeedSummary(accounts: Array<{ id: string; accountType: string | null }>, executionFreshness: Map<string, { createdAt: Date; tradeTime: Date }>): string | null {
+    const summaries = accounts.flatMap((account) => {
+      const latest = executionFreshness.get(account.id);
+      if (!latest) return [];
+      const accountLabel = this.accountTypeLabel(account.accountType) ?? 'Account';
+      const lag = this.duration(latest.createdAt.getTime() - latest.tradeTime.getTime());
+      return [`${accountLabel} confirmed ${this.relativeTime(latest.createdAt)}; broker lag ${lag}`];
+    });
+    return summaries.length ? summaries.join(', ') : null;
+  }
+
   private lastChecked(accounts: Array<{ id: string }>, syncStates: Map<string, Date>): Date | null {
     return accounts.reduce<Date | null>((latest, account) => {
       const checked = syncStates.get(account.id);
@@ -549,6 +590,16 @@ export class TelegramController {
     const hours = Math.floor(minutes / 60);
     if (hours < 48) return `${hours}h ago`;
     return `${Math.floor(hours / 24)}d ago`;
+  }
+
+  private duration(ms: number): string {
+    const seconds = Math.max(0, Math.round(ms / 1000));
+    if (seconds < 90) return `${seconds}s`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes}m`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) return `${hours}h`;
+    return `${Math.round(hours / 24)}d`;
   }
 
   private privateStartKeyboard() {
