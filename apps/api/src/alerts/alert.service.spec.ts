@@ -40,6 +40,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       tradeEvent: {
         findUniqueOrThrow: jest.fn(),
         findFirst: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
         update: jest.fn(),
       },
       groupMember: {
@@ -166,6 +167,28 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(sentTexts[0]).toContain('Execution price · Unavailable');
     expect(sentTexts[0]).toContain('◷ Provisional holdings change · Waiting for broker execution details');
     expect(sentTexts[0]).not.toContain('Broker-confirmed');
+  });
+
+  it('skips a delayed provisional alert when a matching confirmed execution arrived during the grace window', async () => {
+    const recent = new Date(Date.now() - 5 * 60_000);
+    const event = makeEvent({
+      rawType: 'position_delta',
+      rawStatus: 'INFERRED',
+      priceSource: 'POSITION_COST_BASIS',
+      tradeTime: recent,
+      createdAt: recent,
+      account: { id: 'account-1', accountType: 'INDIVIDUAL', connection: { brokerageName: 'Robinhood' } },
+      group: { telegramChatId: '-100', inferredAlertsEnabled: true },
+    });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+    (prisma.tradeEvent.count as jest.Mock).mockResolvedValue(1);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
   });
 
   it('does not send inferred Fidelity alerts even if the group flag is enabled', async () => {

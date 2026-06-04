@@ -64,6 +64,10 @@ export const ALERT = {
   /** Position deltas are timestamped when detected, not when filled. Use a
    *  wider window when checking for an already-known confirmed execution. */
   PROVISIONAL_EXECUTION_MATCH_WINDOW_MS: 15 * 60 * 1000,
+  /** Give broker-confirmed executions a short chance to arrive before posting
+   *  a provisional holdings alert. This prevents confusing yellow->green races
+   *  for brokers whose order feed trails holdings by a few seconds. */
+  PROVISIONAL_SEND_GRACE_MS: 90 * 1000,
 } as const;
 
 export const AUTO_SYNC = {

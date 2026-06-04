@@ -108,7 +108,7 @@ describe('BrokerSyncService position-delta guards', () => {
     expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
-  it('posts an opted-in Robinhood position delta as a provisional alert', async () => {
+  it('schedules an opted-in Robinhood position delta after a grace period', async () => {
     const prisma = {
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
@@ -126,6 +126,7 @@ describe('BrokerSyncService position-delta guards', () => {
       auditLog: { create: jest.fn() },
     };
     const alerts = { sendTradeAlert: jest.fn().mockResolvedValue(true) };
+    const queue = { add: jest.fn().mockResolvedValue({}) };
     const svc = new BrokerSyncService(
       prisma as never,
       null as never,
@@ -133,6 +134,7 @@ describe('BrokerSyncService position-delta guards', () => {
       new TradeDetectorService(),
       alerts as never,
       null as never,
+      queue as never,
     ) as unknown as {
       syncPositionDeltas(
         userId: string,
@@ -150,11 +152,65 @@ describe('BrokerSyncService position-delta guards', () => {
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Robinhood' }, true);
 
-    expect(result).toEqual({ created: 1, alerted: 1 });
+    expect(result).toEqual({ created: 1, alerted: 0 });
     expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({ rawStatus: 'INFERRED', rawType: 'position_delta', alertStatus: 'PENDING' }),
     }));
-    expect(alerts.sendTradeAlert).toHaveBeenCalledWith('trade-1');
+    expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledWith('send-alert', { tradeEventId: 'trade-1' }, expect.objectContaining({
+      jobId: 'send-alert:trade-1',
+      delay: 90_000,
+    }));
+  });
+
+  it('keeps provisional deltas pending when delayed alert scheduling fails', async () => {
+    const prisma = {
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({
+          value: {
+            at: new Date().toISOString(),
+            positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
+          },
+        }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: {
+        count: jest.fn().mockResolvedValue(0),
+        upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
+      },
+      auditLog: { create: jest.fn() },
+    };
+    const alerts = { sendTradeAlert: jest.fn() };
+    const queue = { add: jest.fn().mockRejectedValue(new Error('redis unavailable')) };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      new TradeDetectorService(),
+      alerts as never,
+      null as never,
+      queue as never,
+    ) as unknown as {
+      syncPositionDeltas(
+        userId: string,
+        dbAccountId: string,
+        providerAccountId: string,
+        memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
+        positions: unknown[],
+        suppressBackfill: boolean,
+        broker: { brokerageName?: string },
+        ordersComplete: boolean,
+      ): Promise<{ created: number; alerted: number }>;
+    };
+
+    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true)).resolves.toEqual({ created: 1, alerted: 0 });
+
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ alertStatus: 'PENDING' }),
+    }));
+    expect(alerts.sendTradeAlert).not.toHaveBeenCalled();
   });
 
   it('keeps Fidelity position deltas diagnostic-only even when the group opted in', async () => {

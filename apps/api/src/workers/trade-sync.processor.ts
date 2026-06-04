@@ -4,6 +4,7 @@ import { Job, Queue } from 'bullmq';
 import { BrokerSyncService } from '../broker/broker-sync.service';
 import { PrismaService } from '../config/prisma.service';
 import { JOB_DEFAULTS, SYNC } from '../config/constants';
+import { AlertService } from '../alerts/alert.service';
 
 /**
  * Concurrency + rate limiter chosen conservatively for the SnapTrade free/standard
@@ -20,10 +21,13 @@ import { JOB_DEFAULTS, SYNC } from '../config/constants';
 @Processor('trade-sync', { concurrency: SYNC.CONCURRENCY, limiter: { max: SYNC.RATE_LIMIT_MAX, duration: SYNC.RATE_LIMIT_DURATION_MS } })
 export class TradeSyncProcessor extends WorkerHost {
   private readonly logger = new Logger(TradeSyncProcessor.name);
-  constructor(private sync: BrokerSyncService, private prisma: PrismaService, @InjectQueue('trade-sync') private queue: Queue) { super(); }
+  constructor(private sync: BrokerSyncService, private alerts: AlertService, private prisma: PrismaService, @InjectQueue('trade-sync') private queue: Queue) { super(); }
 
-  async process(job: Job<{ userId?: string }>) {
+  async process(job: Job<{ userId?: string; tradeEventId?: string }>) {
     try {
+      if (job.name === 'send-alert' && job.data.tradeEventId) {
+        return { sent: await this.alerts.sendTradeAlert(job.data.tradeEventId) };
+      }
       if (job.data.userId) return await this.sync.syncUser(job.data.userId);
       return await this.fanOut();
     } catch (err) {

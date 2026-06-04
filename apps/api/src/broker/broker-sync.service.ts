@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { PrismaService } from '../config/prisma.service';
 import { CryptoService } from '../security/crypto.service';
 import { EncryptedSecretError } from '../security/errors';
@@ -11,7 +13,7 @@ import { contractMultiplier } from './asset-type';
 import { shouldSuppressAlert } from './suppress-policy';
 import { scopeKeyToGroup } from './order-key';
 import { supportsProvisionalPositionAlerts } from './broker-freshness';
-import { ALERT } from '../config/constants';
+import { ALERT, JOB_DEFAULTS } from '../config/constants';
 import { isExcludedBotSymbol } from './excluded-symbols';
 
 @Injectable()
@@ -24,6 +26,7 @@ export class BrokerSyncService {
     private detector: TradeDetectorService,
     private alerts: AlertService,
     private config: ConfigService,
+    @InjectQueue('trade-sync') private queue?: Queue,
   ) {}
 
   async syncUser(userId: string, opts: { suppressBackfill?: boolean } = {}): Promise<{ created: number; alerted: number }> {
@@ -290,7 +293,7 @@ export class BrokerSyncService {
     const hasFreshBaseline = this.positionSnapshotIsFresh(state?.value);
 
     let created = 0;
-    let alerted = 0;
+    const alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
       if (positionChangeHealth === 'PARTIAL_DROP') {
@@ -342,11 +345,7 @@ export class BrokerSyncService {
           });
           if (trade.createdAt.getTime() >= startedAt) created += 1;
           if (provisional && trade.alertStatus === 'PENDING') {
-            try {
-              if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
-            } catch (e) {
-              this.logger.warn(`provisional alert send threw for trade ${trade.id}: ${(e as Error).message}`);
-            }
+            await this.scheduleProvisionalAlert(trade.id);
           }
         }
       }
@@ -354,6 +353,26 @@ export class BrokerSyncService {
 
     await this.writePositionSnapshot(userId, dbAccountId, current);
     return { created, alerted };
+  }
+
+  private async scheduleProvisionalAlert(tradeEventId: string): Promise<void> {
+    if (!this.queue) {
+      this.logger.warn(`trade-sync queue unavailable; provisional alert ${tradeEventId} left pending for retry`);
+      return;
+    }
+    try {
+      await this.queue.add(
+        'send-alert',
+        { tradeEventId },
+        {
+          ...JOB_DEFAULTS,
+          jobId: `send-alert:${tradeEventId}`,
+          delay: ALERT.PROVISIONAL_SEND_GRACE_MS,
+        },
+      );
+    } catch (err) {
+      this.logger.warn(`could not schedule provisional alert ${tradeEventId}: ${(err as Error).message}; left pending for retry`);
+    }
   }
 
   private async hasMatchingConfirmedExecution(accountId: string, groupId: string, trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; tradeTime: Date }): Promise<boolean> {

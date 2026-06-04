@@ -36,6 +36,11 @@ export class AlertService {
       await this.mark(event.id, 'SKIPPED');
       return false;
     }
+    if (this.isProvisional(event) && await this.hasMatchingConfirmedExecution(event)) {
+      this.logger.log(`skipping provisional trade ${event.id}; matching confirmed execution already exists`);
+      await this.mark(event.id, 'SKIPPED');
+      return false;
+    }
 
     if (this.isAlertExpired(event)) {
       this.logger.warn(`giving up on trade ${event.id} after ${event.alertAttempts ?? 0} attempt(s) / age cap`);
@@ -124,6 +129,27 @@ export class AlertService {
       });
     });
     return true;
+  }
+
+  private async hasMatchingConfirmedExecution(event: RenderableTrade): Promise<boolean> {
+    if (!event.groupId || !event.account || !event.quantity) return false;
+    const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
+    return (await this.prisma.tradeEvent.count({
+      where: {
+        userId: event.userId,
+        groupId: event.groupId,
+        accountId: event.account.id,
+        symbol: event.symbol,
+        side: event.side,
+        quantity: event.quantity,
+        rawType: { not: 'position_delta' },
+        rawStatus: { not: 'INFERRED' },
+        tradeTime: {
+          gte: new Date(event.tradeTime.getTime() - windowMs),
+          lte: new Date(event.tradeTime.getTime() + windowMs),
+        },
+      },
+    })) > 0;
   }
 
   private async mark(id: string, status: AlertStatus) {
