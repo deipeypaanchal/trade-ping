@@ -306,6 +306,65 @@ describe('BrokerSyncService position-delta guards', () => {
     }));
   });
 
+  it('allows provisional position processing when recent orders fail but historical orders succeed', async () => {
+    const prisma = {
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'user-1',
+          snaptradeUserId: 'snap-user-1',
+          encryptedUserSecret: 'encrypted-secret',
+          memberships: [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }],
+        }),
+      },
+      brokerConnection: {
+        updateMany: jest.fn(),
+        upsert: jest.fn().mockResolvedValue({ id: 'conn-1', brokerageName: 'Robinhood', brokerageSlug: 'ROBINHOOD' }),
+      },
+      brokerAccount: {
+        updateMany: jest.fn(),
+        upsert: jest.fn().mockResolvedValue({ id: 'db-account-1' }),
+      },
+      syncState: {
+        findUnique: jest.fn().mockImplementation(async (args: { where: { userId_accountId_key: { key: string } } }) => {
+          if (args.where.userId_accountId_key.key === 'position_snapshot') {
+            return { value: { at: new Date().toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } };
+          }
+          return { value: { at: new Date(Date.now() - 60_000).toISOString() } };
+        }),
+        upsert: jest.fn(),
+      },
+      auditLog: { create: jest.fn() },
+    };
+    const snap = {
+      listConnections: jest.fn().mockResolvedValue([{ id: 'auth-1', disabled: false, type: 'read', brokerage: { display_name: 'Robinhood', slug: 'ROBINHOOD' } }]),
+      listAccounts: jest.fn().mockResolvedValue([{ id: 'provider-account-1', raw_type: 'INDIVIDUAL' }]),
+      listRecentAccountOrders: jest.fn().mockRejectedValue(new Error('recent unavailable')),
+      listAccountOrders: jest.fn().mockResolvedValue([]),
+      listAccountPositions: jest.fn().mockResolvedValue([{ instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' }]),
+    };
+    const crypto = { decrypt: jest.fn().mockReturnValue('secret'), hash: jest.fn().mockReturnValue('hash') };
+    const config = { getOrThrow: jest.fn().mockReturnValue(3) };
+    const svc = new BrokerSyncService(prisma as never, crypto as never, snap as never, new TradeDetectorService(), null as never, config as never);
+    const testSvc = svc as unknown as {
+      syncUser(userId: string): Promise<{ created: number; alerted: number }>;
+      syncPositionDeltas: jest.Mock;
+    };
+    testSvc.syncPositionDeltas = jest.fn().mockResolvedValue({ created: 0, alerted: 0 });
+
+    await expect(testSvc.syncUser('user-1')).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(testSvc.syncPositionDeltas).toHaveBeenCalledWith(
+      'user-1',
+      'db-account-1',
+      'provider-account-1',
+      [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }],
+      [{ instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' }],
+      false,
+      { id: 'conn-1', brokerageName: 'Robinhood', brokerageSlug: 'ROBINHOOD' },
+      true,
+    );
+  });
+
   it('processes historical orders when the recent endpoint fails', async () => {
     const historical = [{ brokerage_order_id: 'fidelity-1', status: 'EXECUTED', action: 'BUY' }];
     const prisma = { auditLog: { create: jest.fn() } };

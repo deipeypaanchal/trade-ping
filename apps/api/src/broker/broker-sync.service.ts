@@ -161,7 +161,7 @@ export class BrokerSyncService {
           }
           try {
             const positions = await this.snap.listAccountPositions(user.snaptradeUserId, userSecret, acct.id);
-            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true, dbConn, orderFetch.complete);
+            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true, dbConn, orderFetch.historicalComplete);
             created += positionCounts.created;
             alerted += positionCounts.alerted;
           } catch (err) {
@@ -170,8 +170,8 @@ export class BrokerSyncService {
           }
           // recentOrders is a realtime add-on that is not enabled for every
           // SnapTrade customer. The standard historical endpoint is sufficient
-          // to establish the normal-order baseline; provisional holdings alerts
-          // remain stricter and still require both sources to succeed.
+          // to establish the normal-order baseline and to allow clearly labeled
+          // provisional holdings alerts when recentOrders is temporarily flaky.
           if (orderFetch.historicalComplete) await this.markOrderSynced(userId, dbAcct.id);
         }
       } catch (err) {
@@ -280,7 +280,7 @@ export class BrokerSyncService {
     positions: SnapTradePosition[],
     suppressBackfill: boolean,
     broker: { brokerageName?: string | null; brokerageSlug?: string | null } = {},
-    ordersComplete = false,
+    orderHistoryComplete = false,
   ): Promise<{ created: number; alerted: number }> {
     const current = positions
       .map((position) => this.detector.normalizePosition(position))
@@ -313,7 +313,7 @@ export class BrokerSyncService {
           const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
           const provisional = member.group?.inferredAlertsEnabled === true
             && supportsProvisionalPositionAlerts(broker)
-            && ordersComplete
+            && orderHistoryComplete
             && hasFreshBaseline
             && !(await this.hasMatchingConfirmedExecution(dbAccountId, member.groupId, norm));
           const trade = await this.prisma.tradeEvent.upsert({
