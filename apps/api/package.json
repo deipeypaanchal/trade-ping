@@ -21,7 +21,7 @@
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.1.23",
     "@nestjs/platform-express": "^11.1.23",
-    "@prisma/client": "^6.1.0",
+    "@prisma/client": "^7.8.0",
     "bottleneck": "^2.19.5",
     "bullmq": "^5.34.7",
     "express": "^5.2.1",
@@ -42,7 +42,7 @@
     "eslint": "^10.4.0",
     "globals": "^15.14.0",
     "jest": "^30.4.2",
-    "prisma": "^6.1.0",
+    "prisma": "^7.8.0",
     "ts-jest": "^29.2.5",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2"
