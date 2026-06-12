@@ -107,6 +107,7 @@ All variables are validated by Zod at boot (`apps/api/src/config/env.ts`). The s
 | `SNAPTRADE_BROKER_SLUG` | no | `ROBINHOOD` | If set, Connection Portal opens directly into that brokerage. Leave blank to show the list. |
 | `SNAPTRADE_USE_MOCK` | no | `false` | Must be `false` in production (validated). |
 | `ENCRYPTION_KEY_BASE64` | yes | base64 32 bytes | Generated above. Encrypts SnapTrade `userSecret` in Postgres. |
+| `RELEASE_SHA` | no | `9c49eaa` | Deploy metadata returned by `/healthz` and `/livez`. The recovery script sets this from `git rev-parse` when possible. |
 | `TRADE_ORDER_LOOKBACK_DAYS` | no | `3` | How many days of orders to scan per sync (max 90). 3 is sane for near-real-time use. |
 | `SYNC_INTERVAL_MINUTES` | no | `5` | Cadence for the external cron hitting `POST /jobs/sync-all`. Lower = more SnapTrade calls. |
 | `BACKFILL_SUPPRESS_HOURS` | no | `24` | On a user's first sync, trades older than this are recorded as `BACKFILL` and **not** alerted. |
@@ -128,8 +129,9 @@ SNAPTRADE_USE_MOCK=false
 ```bash
 # from repo root, after committing all code
 railway init                 # or: connect repo in dashboard
-railway add --plugin postgresql
-railway add --plugin redis
+railway add --database postgres
+railway add --database redis
+railway add --service api --repo <github-org-or-user>/<repo> --branch main
 ```
 
 Then in Railway dashboard:
@@ -143,7 +145,7 @@ Then in Railway dashboard:
 Run the initial migration once the service is up:
 
 ```bash
-railway run pnpm db:deploy
+railway run corepack pnpm db:deploy
 ```
 
 Skip ahead to §8 (Telegram webhook) and §9 (SnapTrade dashboard) once the URL is live.
@@ -326,6 +328,70 @@ If your SnapTrade plan reliably fires `ACCOUNT_HOLDINGS_UPDATED` on every change
 
 ## 13. Operational runbook
 
+### Railway resource-limit recovery
+
+If Railway reports `You have used all your available resources`, do not start by
+deleting Postgres. Postgres is the source of truth for users, connected broker
+accounts, Telegram group mappings, privacy settings, trade events, alerts, and
+audit logs. Redis and the API service are rebuildable; Postgres is not
+rebuildable without forcing every user through setup again.
+
+Safe recovery order:
+
+1. Confirm current state:
+
+   ```bash
+   railway status
+   railway service list --json
+   railway volume list --json
+   curl -fsS https://<your-domain>/healthz
+   ```
+
+2. If the quota is still blocked, wait for the free-plan quota reset or raise
+   the workspace usage limit in Railway Billing/Usage.
+3. After quota is available, run the CLI recovery script from the repo root:
+
+   ```bash
+   cp .env.example .env.production.local
+   # Fill .env.production.local from your private secret manager.
+   scripts/railway-recover.sh .env.production.local
+   ```
+
+The recovery script:
+
+- Refuses to recreate Postgres automatically if the Postgres service is missing.
+- Redeploys the existing Postgres service first.
+- Recreates Redis if it was deleted during cleanup.
+- Recreates the `api` service if it was deleted.
+- Pushes API variables from the local untracked env file or shell environment.
+- Deploys the API and polls `/healthz`.
+
+Allowed cleanup before the quota reset:
+
+```bash
+# Lower-risk cleanup: queue/cache only.
+railway volume detach --volume <redis-volume-id> --yes
+railway volume delete --volume <redis-volume-id> --yes
+railway service delete --service Redis --yes
+
+# Stateless service cleanup. Requires recreating API variables later.
+railway service delete --service api --yes
+```
+
+Do not run these unless you explicitly accept a clean beta reset:
+
+```bash
+railway volume delete --volume <postgres-volume-id> --yes
+railway service delete --service Postgres --yes
+```
+
+After recovery, immediately take a Postgres backup and run the smoke tests in
+§11 before inviting users to trade again:
+
+```bash
+corepack pnpm db:backup .env.production.local
+```
+
 ### Rotating secrets
 
 - **Telegram bot token**: BotFather → `/revoke` → generate new → update `TELEGRAM_BOT_TOKEN` → re-run `setWebhook`.
@@ -407,6 +473,36 @@ Rolling deploy is safe: the service is stateless, the queue persists in Redis, a
 - Postgres: enable daily snapshots in your managed provider, retain 7+ days. Test restore at least once.
 - Redis: queue state is recoverable from re-syncing SnapTrade, so snapshots are nice-to-have, not critical.
 - Secrets: store a sealed copy (1Password vault, etc.) outside the hosting platform. Losing `ENCRYPTION_KEY_BASE64` means every stored `userSecret` is unrecoverable.
+
+### Manual Postgres backup
+
+Use the checked-in helper whenever you recover production, run a risky migration,
+or before a beta cohort starts trading:
+
+```bash
+cp .env.example .env.production.local
+# Fill DATABASE_PUBLIC_URL or DATABASE_URL from your private secret manager.
+corepack pnpm db:backup .env.production.local
+```
+
+The script writes a custom-format `pg_dump` under `backups/` and a SHA-256 file
+next to it. `backups/` is gitignored.
+
+For Railway, prefer `DATABASE_PUBLIC_URL` from the Postgres service variables
+when running the backup locally. The private `postgres.railway.internal` URL only
+works from inside Railway's private network.
+
+Restore drill against a throwaway database:
+
+```bash
+createdb tradeping_restore_test
+pg_restore --clean --if-exists --no-owner --no-acl \
+  --dbname postgresql://localhost:5432/tradeping_restore_test \
+  backups/tradeping-postgres-<timestamp>.dump
+```
+
+Never restore over production until you have confirmed the target URL and taken a
+fresh backup of the current production database.
 
 ---
 

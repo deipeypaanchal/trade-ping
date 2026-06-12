@@ -56,6 +56,30 @@ SNAPTRADE_USE_MOCK=true
 
 The service registers the Telegram webhook and command menu automatically on boot when `APP_BASE_URL` is public HTTPS and `TELEGRAM_BOT_TOKEN` is real.
 
+## Railway Recovery
+
+If Railway pauses the project for a free-plan resource limit, protect Postgres
+first. Postgres contains users, connected broker accounts, Telegram group
+mappings, privacy settings, trade events, alerts, and audit logs. Redis and the
+API service can be rebuilt.
+
+After the Railway quota resets or the workspace usage limit is raised:
+
+```bash
+cp .env.example .env.production.local
+# Fill .env.production.local from your private secret manager.
+corepack pnpm railway:recover .env.production.local
+```
+
+After Postgres is back online, take a backup before inviting users to trade:
+
+```bash
+corepack pnpm db:backup .env.production.local
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#railway-resource-limit-recovery)
+for the full runbook.
+
 ## Bot Commands
 
 - `/connect` - connect a read-only brokerage.
@@ -113,9 +137,11 @@ TradePing checks automatically in the background and reacts to SnapTrade webhook
 ## Useful Docs
 
 - [Deployment Guide](docs/DEPLOYMENT.md)
+- [Incident Runbook](docs/INCIDENT_RUNBOOK.md)
 - [2026-06-02 End-to-End Audit](docs/E2E_AUDIT_2026-06-02.md)
 - [Beta Launch Guide](docs/BETA_LAUNCH.md)
 - [Launch Readiness](docs/LAUNCH_READINESS.md)
+- [Telegram Message Catalog](docs/MESSAGE_CATALOG.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Privacy Policy Draft](docs/PRIVACY.md)
 - [Terms Draft](docs/TERMS.md)

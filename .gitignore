@@ -11,3 +11,4 @@ coverage/
 *.log
 *.tsbuildinfo
 node_modules
+backups/

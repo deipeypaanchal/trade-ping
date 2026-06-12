@@ -49,6 +49,8 @@
 - [ ] Redis not publicly exposed
 - [ ] Logs checked for secrets/PII leaks
 - [ ] Sentry/monitoring configured
+- [ ] Postgres backup and Railway recovery script tested
+- [ ] Incident runbook reviewed (`docs/INCIDENT_RUNBOOK.md`)
 - [ ] Account deletion tested
 - [ ] SnapTrade webhook signature test passes
 
@@ -57,5 +59,6 @@
 - [x] Terms of service draft (`docs/TERMS.md` — requires counsel review)
 - [x] Privacy policy draft (`docs/PRIVACY.md` — requires counsel review)
 - [x] Not-financial-advice disclaimer (`docs/DISCLAIMER.md`, embedded in every alert)
+- [ ] Telegram message catalog reviewed against current bot copy (`docs/MESSAGE_CATALOG.md`)
 - [x] No copy-trading UI
 - [x] No public leaderboard in v1

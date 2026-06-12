@@ -12,7 +12,10 @@
     "db:generate": "corepack pnpm --filter @tradeping/api prisma:generate",
     "db:migrate": "corepack pnpm --filter @tradeping/api prisma:migrate",
     "db:deploy": "corepack pnpm --filter @tradeping/api prisma:deploy",
-    "lint": "corepack pnpm --filter @tradeping/api lint"
+    "db:backup": "scripts/pg-backup.sh",
+    "lint": "corepack pnpm --filter @tradeping/api lint",
+    "railway:recover": "scripts/railway-recover.sh",
+    "scripts:check": "bash -n scripts/*.sh"
   },
   "dependencies": {
     "@prisma/client": "^6.1.0"
