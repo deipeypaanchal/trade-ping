@@ -15,7 +15,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Gitleaks
@@ -24,7 +24,7 @@ jobs:
   dependencies:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: OSV Scanner
         continue-on-error: true
         run: docker run --rm -v "$PWD:/src" ghcr.io/google/osv-scanner:latest scan --lockfile=/src/pnpm-lock.yaml
@@ -36,7 +36,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
