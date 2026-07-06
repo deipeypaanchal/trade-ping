@@ -11,7 +11,8 @@ export class BrokerOnboardingService {
 
   async createConnectUrl(userId: string, groupId: string): Promise<string> {
     const user = await this.registeredUser(userId);
-    const url = await this.snap.connectionPortal(user.snaptradeUserId!, this.crypto.decrypt(user.encryptedUserSecret!), groupId);
+    const snapUser = await this.readOrResetSecret(user.id, user.snaptradeUserId!, user.encryptedUserSecret!);
+    const url = await this.snap.connectionPortal(snapUser.userId, snapUser.userSecret, groupId);
     await this.audit(user.id, 'connection_portal_created', { groupId, sessionId: url.sessionId });
     if (!url.redirectURI) throw new Error('SnapTrade did not return redirectURI');
     return url.redirectURI;
@@ -47,6 +48,34 @@ export class BrokerOnboardingService {
       await this.audit(user.id, 'snaptrade_user_registered', {});
     }
     return user;
+  }
+
+  private async readOrResetSecret(userId: string, snaptradeUserId: string, encryptedUserSecret: string): Promise<{ userId: string; userSecret: string }> {
+    try {
+      return { userId: snaptradeUserId, userSecret: this.crypto.decrypt(encryptedUserSecret) };
+    } catch (err) {
+      if (!(err instanceof EncryptedSecretError)) throw err;
+      this.logger.warn(`createConnectUrl(${userId}): encrypted secret unreadable; resetting SnapTrade registration`);
+      try {
+        await this.snap.deleteUser(snaptradeUserId);
+      } catch (deleteErr) {
+        this.logger.warn(`createConnectUrl(${userId}): could not delete old SnapTrade user ${snaptradeUserId}: ${(deleteErr as Error).message}`);
+      }
+      const snapUser = await this.snap.registerUser(userId);
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          snaptradeUserId: snapUser.userId,
+          encryptedUserSecret: this.crypto.encrypt(snapUser.userSecret),
+        },
+      });
+      await this.prisma.brokerConnection.updateMany({
+        where: { userId },
+        data: { status: 'DISCONNECTED', disabledReason: 'Secret reset during production recovery — reconnect required', disconnectedAt: new Date() },
+      });
+      await this.audit(userId, 'snaptrade_user_reset_after_secret_loss', {});
+      return snapUser;
+    }
   }
 
   async refreshConnections(userId: string): Promise<void> {
