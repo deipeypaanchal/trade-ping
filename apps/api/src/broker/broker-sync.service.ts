@@ -191,7 +191,14 @@ export class BrokerSyncService {
 
   /** IDs of every user that has completed SnapTrade registration and can be synced. */
   async listSyncableUserIds(): Promise<string[]> {
-    const users = await this.prisma.user.findMany({ where: { snaptradeUserId: { not: null }, encryptedUserSecret: { not: null } }, select: { id: true } });
+    const users = await this.prisma.user.findMany({
+      where: {
+        snaptradeUserId: { not: null },
+        encryptedUserSecret: { not: null },
+        brokerConnections: { some: { status: { not: 'DISCONNECTED' } } },
+      },
+      select: { id: true },
+    });
     return users.map((u) => u.id);
   }
 
