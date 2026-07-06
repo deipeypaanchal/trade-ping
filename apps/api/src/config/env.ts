@@ -27,6 +27,7 @@ export const envSchema = z.object({
   ENCRYPTION_KEY_BASE64: z.string().min(32),
   INTERNAL_JOB_SECRET: z.string().min(32),
   RELEASE_SHA: z.string().min(7).optional(),
+  RECOVERY_SUPPRESS_BEFORE: z.string().datetime().optional(),
   TRADE_ORDER_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(3),
   SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
   BACKFILL_SUPPRESS_HOURS: z.coerce.number().int().min(0).max(168).default(24),

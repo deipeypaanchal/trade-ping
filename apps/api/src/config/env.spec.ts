@@ -28,4 +28,8 @@ describe('validateEnv', () => {
   it('rejects mock SnapTrade mode in production', () => {
     expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', SNAPTRADE_USE_MOCK: 'true' })).toThrow(/SNAPTRADE_USE_MOCK/);
   });
+
+  it('accepts an optional recovery suppression timestamp', () => {
+    expect(validateEnv({ ...baseEnv, RECOVERY_SUPPRESS_BEFORE: '2026-07-06T05:00:00.000Z' }).RECOVERY_SUPPRESS_BEFORE).toBe('2026-07-06T05:00:00.000Z');
+  });
 });

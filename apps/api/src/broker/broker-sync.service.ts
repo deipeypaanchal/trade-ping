@@ -101,6 +101,7 @@ export class BrokerSyncService {
           const lastSuccessfulSyncAt = await this.lastSuccessfulSyncAt(userId, dbAcct.id);
           const isFirstSync = lastSuccessfulSyncAt === null;
           const backfillSuppressHours = this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS');
+          const suppressBefore = this.recoverySuppressBefore();
           for (const order of orders) {
             const norm = this.detector.normalizeOrder(userId, acct.id, order);
             if (!norm) continue;
@@ -112,6 +113,7 @@ export class BrokerSyncService {
               isFirstSync,
               suppressBackfill: opts.suppressBackfill === true,
               backfillSuppressHours,
+              suppressBefore,
             });
             const suppress = decision.suppress;
             for (const member of user.memberships) {
@@ -246,6 +248,15 @@ export class BrokerSyncService {
     if (typeof at !== 'string') return null;
     const d = new Date(at);
     return Number.isFinite(d.getTime()) ? d : null;
+  }
+
+  private recoverySuppressBefore(): Date | null {
+    const getter = (this.config as ConfigService & { get?: <T>(key: string) => T | undefined }).get;
+    const raw = typeof getter === 'function' ? getter.call(this.config, 'RECOVERY_SUPPRESS_BEFORE') : undefined;
+    if (typeof raw !== 'string') return null;
+    if (!raw) return null;
+    const date = new Date(raw);
+    return Number.isFinite(date.getTime()) ? date : null;
   }
 
   private async positionSnapshot(userId: string, accountId: string): Promise<PositionSnapshotEntry[]> {

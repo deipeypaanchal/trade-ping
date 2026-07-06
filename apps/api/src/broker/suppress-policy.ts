@@ -16,13 +16,15 @@ export type SuppressInput = {
   suppressBackfill: boolean;
   /** Configured "anything older than this is backfill" window. */
   backfillSuppressHours: number;
+  /** Recovery guard: never alert executions that predate this timestamp. */
+  suppressBefore?: Date | null;
   /** Now, injected for deterministic tests. */
   now?: Date;
 };
 
 export type SuppressDecision = {
   suppress: boolean;
-  reason: 'suppress_backfill_flag' | 'first_sync' | 'older_than_backfill_window' | 'fresh';
+  reason: 'suppress_backfill_flag' | 'first_sync' | 'recovery_suppress_before' | 'older_than_backfill_window' | 'fresh';
 };
 
 export function shouldSuppressAlert(input: SuppressInput): SuppressDecision {
@@ -31,6 +33,10 @@ export function shouldSuppressAlert(input: SuppressInput): SuppressDecision {
 
   const now = (input.now ?? new Date()).getTime();
   const tradeMs = input.tradeTime.getTime();
+  const suppressBeforeMs = input.suppressBefore?.getTime();
+  if (suppressBeforeMs !== undefined && Number.isFinite(suppressBeforeMs) && tradeMs < suppressBeforeMs) {
+    return { suppress: true, reason: 'recovery_suppress_before' };
+  }
   const backfillCutoff = now - input.backfillSuppressHours * 3_600_000;
 
   // The event dedupe hash prevents re-alerting orders already persisted before

@@ -49,6 +49,27 @@ describe('shouldSuppressAlert', () => {
     expect(d).toEqual({ suppress: true, reason: 'older_than_backfill_window' });
   });
 
+  it('suppresses executions before the recovery marker without blocking newer trades', () => {
+    const marker = new Date('2026-05-22T12:00:00Z');
+    expect(shouldSuppressAlert({
+      tradeTime: new Date('2026-05-22T11:59:59Z'),
+      isFirstSync: false,
+      suppressBackfill: false,
+      backfillSuppressHours: HOURS,
+      suppressBefore: marker,
+      now: NOW,
+    })).toEqual({ suppress: true, reason: 'recovery_suppress_before' });
+
+    expect(shouldSuppressAlert({
+      tradeTime: new Date('2026-05-22T12:00:01Z'),
+      isFirstSync: false,
+      suppressBackfill: false,
+      backfillSuppressHours: HOURS,
+      suppressBefore: marker,
+      now: NOW,
+    })).toEqual({ suppress: false, reason: 'fresh' });
+  });
+
   it('allows a delayed but unseen execution inside the static backfill window', () => {
     const d = shouldSuppressAlert({
       tradeTime: new Date(NOW.getTime() - 12 * 3_600_000),
