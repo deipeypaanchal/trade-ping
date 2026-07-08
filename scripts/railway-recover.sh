@@ -108,6 +108,9 @@ fi
 echo "== Setting API variables =="
 railway variable set --service api 'DATABASE_URL=${{Postgres.DATABASE_URL}}' --skip-deploys --json >/dev/null
 railway variable set --service api 'REDIS_URL=${{Redis.REDIS_URL}}' --skip-deploys --json >/dev/null
+if [[ -z "${RECOVERY_SUPPRESS_BEFORE:-}" ]]; then
+  RECOVERY_SUPPRESS_BEFORE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+fi
 release_sha="${RELEASE_SHA:-$(git rev-parse --short=12 HEAD 2>/dev/null || true)}"
 if [[ -n "$release_sha" ]]; then
   printf '%s' "$release_sha" | railway variable set --service api --stdin RELEASE_SHA --skip-deploys --json >/dev/null
@@ -115,6 +118,7 @@ fi
 for name in "${required_api_vars[@]}"; do
   printf '%s' "${!name}" | railway variable set --service api --stdin "$name" --skip-deploys --json >/dev/null
 done
+printf '%s' "$RECOVERY_SUPPRESS_BEFORE" | railway variable set --service api --stdin RECOVERY_SUPPRESS_BEFORE --skip-deploys --json >/dev/null
 
 echo "== Deploying API =="
 railway up --service api --detach --message "recover production after Railway resource reset"

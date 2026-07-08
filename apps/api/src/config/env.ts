@@ -10,6 +10,14 @@ const envBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+function isExactly32ByteBase64(value: string): boolean {
+  try {
+    return Buffer.from(value, 'base64').length === 32;
+  } catch {
+    return false;
+  }
+}
+
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development','test','production']).default('development'),
   PORT: z.coerce.number().default(3000),
@@ -24,7 +32,7 @@ export const envSchema = z.object({
   SNAPTRADE_REDIRECT_URI: z.string().url(),
   SNAPTRADE_BROKER_SLUG: z.string().optional(),
   SNAPTRADE_USE_MOCK: envBoolean.default(false),
-  ENCRYPTION_KEY_BASE64: z.string().min(32),
+  ENCRYPTION_KEY_BASE64: z.string().refine(isExactly32ByteBase64, 'must decode to exactly 32 bytes'),
   INTERNAL_JOB_SECRET: z.string().min(32),
   RELEASE_SHA: z.string().min(7).optional(),
   RECOVERY_SUPPRESS_BEFORE: z.string().datetime().optional(),
@@ -38,6 +46,17 @@ export const envSchema = z.object({
       path: ['SNAPTRADE_USE_MOCK'],
       message: 'SNAPTRADE_USE_MOCK must be false in production',
     });
+  }
+  if (env.NODE_ENV === 'production') {
+    for (const key of ['APP_BASE_URL', 'SNAPTRADE_REDIRECT_URI'] as const) {
+      if (!env[key].startsWith('https://')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} must use https:// in production`,
+        });
+      }
+    }
   }
 });
 

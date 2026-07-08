@@ -28,8 +28,12 @@ export class AlertService {
       where: { id: tradeEventId },
       include: { user: true, group: true, account: { include: { connection: true } } },
     })) as unknown as RenderableTrade;
-    if (event.alertStatus !== 'PENDING') {
+    if (!this.isClaimable(event)) {
       this.logger.log(`skipping trade ${event.id}; alert status is already ${event.alertStatus}`);
+      return false;
+    }
+    if (!await this.claimForDelivery(event)) {
+      this.logger.log(`skipping trade ${event.id}; another worker already claimed it`);
       return false;
     }
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
@@ -70,6 +74,34 @@ export class AlertService {
       await this.stampAttempt(event.id);
       return false;
     }
+  }
+
+  private isClaimable(event: { alertStatus: AlertStatus | string; lastAlertAttemptAt?: Date | null }): boolean {
+    if (event.alertStatus === 'PENDING') return true;
+    if (event.alertStatus !== 'SENDING') return false;
+    const lastAttempt = event.lastAlertAttemptAt?.getTime();
+    return !lastAttempt || Date.now() - lastAttempt > ALERT.SEND_CLAIM_STALE_MS;
+  }
+
+  private async claimForDelivery(event: { id: string; alertStatus: AlertStatus | string; lastAlertAttemptAt?: Date | null }): Promise<boolean> {
+    const staleBefore = new Date(Date.now() - ALERT.SEND_CLAIM_STALE_MS);
+    const claimed = await this.prisma.tradeEvent.updateMany({
+      where: {
+        id: event.id,
+        OR: [
+          { alertStatus: 'PENDING' },
+          {
+            alertStatus: 'SENDING',
+            OR: [
+              { lastAlertAttemptAt: null },
+              { lastAlertAttemptAt: { lt: staleBefore } },
+            ],
+          },
+        ],
+      },
+      data: { alertStatus: 'SENDING', lastAlertAttemptAt: new Date() },
+    });
+    return claimed.count === 1;
   }
 
   private isAlertExpired(event: { alertAttempts: number | null; tradeTime: Date; createdAt: Date; rawStatus: string | null; rawType: string | null }): boolean {
@@ -170,7 +202,7 @@ export class AlertService {
   private async stampAttempt(id: string) {
     await this.prisma.tradeEvent.update({
       where: { id },
-      data: { alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
+      data: { alertStatus: 'PENDING', alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
     });
   }
 

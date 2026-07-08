@@ -41,6 +41,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
         findUniqueOrThrow: jest.fn(),
         findFirst: jest.fn().mockResolvedValue(null),
         count: jest.fn().mockResolvedValue(0),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
         update: jest.fn(),
       },
       groupMember: {
@@ -70,6 +71,37 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     expect(sendImpl).not.toHaveBeenCalled();
     expect(prisma.tradeEvent.update).not.toHaveBeenCalled();
+  });
+
+  it('does not send when another worker already claimed the event', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+    (prisma.tradeEvent.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ id: 'trade-1' }),
+      data: expect.objectContaining({ alertStatus: 'SENDING' }),
+    }));
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.alert.create).not.toHaveBeenCalled();
+  });
+
+  it('returns transient failures to pending so they can retry without duplicate concurrent sends', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn().mockRejectedValue(new Error('network down'));
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({
+      where: { id: 'trade-1' },
+      data: expect.objectContaining({ alertStatus: 'PENDING', alertAttempts: { increment: 1 } }),
+    });
   });
 
   it('escapes HTML special characters including quotes', async () => {

@@ -68,6 +68,9 @@ export const ALERT = {
    *  a provisional holdings alert. This prevents confusing yellow->green races
    *  for brokers whose order feed trails holdings by a few seconds. */
   PROVISIONAL_SEND_GRACE_MS: 90 * 1000,
+  /** If a worker dies after claiming an alert but before finalizing it, another
+   *  worker may reclaim it after this window. */
+  SEND_CLAIM_STALE_MS: 5 * 60 * 1000,
 } as const;
 
 export const AUTO_SYNC = {

@@ -4,6 +4,7 @@ import { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import { BrokerSyncService } from '../broker/broker-sync.service';
 import { JOB_DEFAULTS } from '../config/constants';
+import { safeBearerEqual } from '../security/constant-time';
 
 @Controller('jobs')
 export class SchedulerController {
@@ -12,14 +13,14 @@ export class SchedulerController {
   @Post('sync-all')
   async syncAll(@Headers('authorization') auth?: string) {
     this.requireInternal(auth);
-    await this.queue.add('sync-all', {}, { ...JOB_DEFAULTS });
+    await this.queue.add('sync-all', { reason: 'manual' }, { jobId: this.windowedJobId('manual-sync-all'), ...JOB_DEFAULTS });
     return { ok: true };
   }
 
   @Post('sync-user')
   async syncUser(@Body() body: { userId: string }, @Headers('authorization') auth?: string) {
     this.requireInternal(auth);
-    await this.queue.add('sync-user', { userId: body.userId }, { ...JOB_DEFAULTS });
+    await this.queue.add('sync-user', { userId: body.userId }, { jobId: this.windowedJobId(`manual-sync-user-${body.userId}`), ...JOB_DEFAULTS });
     return { ok: true };
   }
 
@@ -32,6 +33,10 @@ export class SchedulerController {
 
   private requireInternal(auth?: string) {
     const secret = this.config.getOrThrow<string>('INTERNAL_JOB_SECRET');
-    if (auth !== `Bearer ${secret}`) throw new UnauthorizedException();
+    if (!safeBearerEqual(auth, secret)) throw new UnauthorizedException();
+  }
+
+  private windowedJobId(prefix: string) {
+    return `${prefix}-${Math.floor(Date.now() / 60_000)}`;
   }
 }

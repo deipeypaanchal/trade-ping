@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Delete, Headers, UnauthorizedExc
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../config/prisma.service';
 import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
+import { safeBearerEqual } from '../security/constant-time';
 
 @Controller('account')
 export class AccountController {
@@ -10,7 +11,7 @@ export class AccountController {
   @Delete('delete')
   async deleteAccount(@Body() body: { telegramUserId?: string; userId?: string }, @Headers('authorization') auth?: string) {
     const secret = this.config.getOrThrow<string>('INTERNAL_JOB_SECRET');
-    if (auth !== `Bearer ${secret}`) throw new UnauthorizedException();
+    if (!safeBearerEqual(auth, secret)) throw new UnauthorizedException();
     // XOR validation: caller must specify exactly one identifier. Accepting
     // both has historically been a confused-deputy footgun — a stale userId
     // alongside the intended telegramUserId silently deleted the wrong account.

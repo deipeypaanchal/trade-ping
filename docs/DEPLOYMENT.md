@@ -108,6 +108,7 @@ All variables are validated by Zod at boot (`apps/api/src/config/env.ts`). The s
 | `SNAPTRADE_USE_MOCK` | no | `false` | Must be `false` in production (validated). |
 | `ENCRYPTION_KEY_BASE64` | yes | base64 32 bytes | Generated above. Encrypts SnapTrade `userSecret` in Postgres. |
 | `RELEASE_SHA` | no | `9c49eaa` | Deploy metadata returned by `/healthz` and `/livez`. The recovery script sets this from `git rev-parse` when possible. |
+| `RECOVERY_SUPPRESS_BEFORE` | no | `2026-07-06T05:44:00Z` | Emergency recovery guard. Executions before this timestamp are recorded but never posted, preventing downtime backfill spam. |
 | `TRADE_ORDER_LOOKBACK_DAYS` | no | `3` | How many days of orders to scan per sync (max 90). 3 is sane for near-real-time use. |
 | `SYNC_INTERVAL_MINUTES` | no | `5` | Cadence for the external cron hitting `POST /jobs/sync-all`. Lower = more SnapTrade calls. |
 | `BACKFILL_SUPPRESS_HOURS` | no | `24` | On a user's first sync, trades older than this are recorded as `BACKFILL` and **not** alerted. |

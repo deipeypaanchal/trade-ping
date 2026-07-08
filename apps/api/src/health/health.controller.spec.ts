@@ -33,7 +33,7 @@ describe('HealthController', () => {
         ok: false,
         checks: {
           database: 'up',
-          redis: 'down: connection refused',
+          redis: 'down',
         },
       }));
     }
@@ -53,7 +53,7 @@ describe('HealthController', () => {
       expect((err as ServiceUnavailableException).getResponse()).toEqual(expect.objectContaining({
         ok: false,
         checks: {
-          database: 'down: db refused',
+          database: 'down',
           redis: 'up',
         },
       }));

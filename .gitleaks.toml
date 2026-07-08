@@ -1,3 +1,14 @@
 [allowlist]
-description = "Known test-only placeholder in the initial env spec commit."
-commits = ["4233c4276d4d5f5c983e79bffbd58aa5bd82e8ce"]
+description = "Documented placeholder values only; never allowlist whole commits."
+paths = [
+  '''^\.env\.example$''',
+  '''^apps/api/src/config/env\.spec\.ts$''',
+  '''^docs/.*\.md$''',
+]
+regexes = [
+  '''123456:token''',
+  '''test_webhook_secret_value''',
+  '''internal_job_secret_1234567890abcd''',
+  '''snap-client''',
+  '''snap-consumer''',
+]

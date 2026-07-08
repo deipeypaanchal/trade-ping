@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -6,6 +6,7 @@ import { PrismaService } from '../config/prisma.service';
 
 @Controller()
 export class HealthController {
+  private readonly logger = new Logger(HealthController.name);
   private readonly startedAt = new Date();
   constructor(
     private readonly prisma: PrismaService,
@@ -27,7 +28,8 @@ export class HealthController {
       checks.database = 'up';
     } catch (err) {
       healthy = false;
-      checks.database = `down: ${(err as Error).message}`;
+      this.logger.warn(`database health check failed: ${(err as Error).message}`);
+      checks.database = 'down';
     }
 
     try {
@@ -36,7 +38,8 @@ export class HealthController {
       checks.redis = 'up';
     } catch (err) {
       healthy = false;
-      checks.redis = `down: ${(err as Error).message}`;
+      this.logger.warn(`redis health check failed: ${(err as Error).message}`);
+      checks.redis = 'down';
     }
 
     if (!healthy) throw new ServiceUnavailableException({ ok: false, ...this.meta(), checks });

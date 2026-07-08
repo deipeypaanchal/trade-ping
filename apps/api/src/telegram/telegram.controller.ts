@@ -10,6 +10,7 @@ import { BrokerOnboardingService } from '../broker/broker-onboarding.service';
 import { PrivacyService } from '../privacy/privacy.service';
 import { brokerFreshnessNote, brokerFreshnessSummary } from '../broker/broker-freshness';
 import { EncryptedSecretError } from '../security/errors';
+import { safeEqual } from '../security/constant-time';
 
 const VALID_PRIVACY = new Set(['PUBLIC', 'NORMAL', 'PRIVATE', 'OFF']);
 
@@ -27,7 +28,7 @@ export class TelegramController {
   @Post('webhook')
   async webhook(@Body() update: TelegramUpdate, @Headers('x-telegram-bot-api-secret-token') secret?: string) {
     const expected = this.config.getOrThrow<string>('TELEGRAM_WEBHOOK_SECRET');
-    if (secret !== expected) throw new UnauthorizedException();
+    if (!safeEqual(secret, expected)) throw new UnauthorizedException();
     const msg = update.message;
     if (!msg) return { ok: true };
 
@@ -519,6 +520,7 @@ export class TelegramController {
     if (trade.alertStatus === 'SENT' && (trade.rawType === 'position_delta' || trade.rawStatus === 'INFERRED')) return 'Alert result: posted as a provisional holdings change because this group opted in.';
     if (trade.alertStatus === 'SENT') return 'Alert result: posted to the group.';
     if (trade.alertStatus === 'PENDING') return 'Alert result: queued for delivery.';
+    if (trade.alertStatus === 'SENDING') return 'Alert result: currently being delivered.';
     if (trade.alertStatus === 'FAILED') return 'Alert result: delivery failed and will retry if still inside the retry window.';
     if (member && (!member.alertsEnabled || member.privacyLevel === 'OFF')) return 'Alert result: skipped because your alerts are off in this group.';
     if (trade.backfillStatus === 'BACKFILL') return 'Alert result: skipped as older broker history/backfill, so TradePing did not replay it into the group.';

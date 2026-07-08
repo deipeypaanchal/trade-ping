@@ -29,6 +29,15 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', SNAPTRADE_USE_MOCK: 'true' })).toThrow(/SNAPTRADE_USE_MOCK/);
   });
 
+  it('requires the encryption key to decode to exactly 32 bytes', () => {
+    expect(() => validateEnv({ ...baseEnv, ENCRYPTION_KEY_BASE64: Buffer.alloc(31, 7).toString('base64') })).toThrow(/32 bytes/);
+  });
+
+  it('requires https public urls in production', () => {
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', APP_BASE_URL: 'http://tradeping.example' })).toThrow(/APP_BASE_URL/);
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', SNAPTRADE_REDIRECT_URI: 'http://tradeping.example/snaptrade/callback' })).toThrow(/SNAPTRADE_REDIRECT_URI/);
+  });
+
   it('accepts an optional recovery suppression timestamp', () => {
     expect(validateEnv({ ...baseEnv, RECOVERY_SUPPRESS_BEFORE: '2026-07-06T05:00:00.000Z' }).RECOVERY_SUPPRESS_BEFORE).toBe('2026-07-06T05:00:00.000Z');
   });

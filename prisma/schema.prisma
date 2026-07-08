@@ -29,6 +29,7 @@ enum TradeSide {
 
 enum AlertStatus {
   PENDING
+  SENDING
   SENT
   SKIPPED
   FAILED
