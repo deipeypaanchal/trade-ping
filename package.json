@@ -13,6 +13,7 @@
     "db:migrate": "corepack pnpm --filter @tradeping/api prisma:migrate",
     "db:deploy": "corepack pnpm --filter @tradeping/api prisma:deploy",
     "db:backup": "scripts/pg-backup.sh",
+    "db:recovery-cleanup": "scripts/recovery-cleanup.sh",
     "lint": "corepack pnpm --filter @tradeping/api lint",
     "railway:recover": "scripts/railway-recover.sh",
     "scripts:check": "bash -n scripts/*.sh"

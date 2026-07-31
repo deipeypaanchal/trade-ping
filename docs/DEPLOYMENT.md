@@ -393,6 +393,26 @@ After recovery, immediately take a Postgres backup and run the smoke tests in
 corepack pnpm db:backup .env.production.local
 ```
 
+When an outage must not replay executions from before a specific local date,
+convert that boundary to UTC and apply it at all three recovery layers. For
+example, midnight on July 31, 2026 in New York is `2026-07-31T04:00:00.000Z`:
+
+```bash
+# 1. Set RECOVERY_SUPPRESS_BEFORE on the API before it starts.
+# 2. Back up Postgres before any cleanup.
+corepack pnpm db:backup .env.production.local
+
+# 3. Preserve account links/dedupe records while neutralizing old alerts.
+TRADEPING_CLEANUP_CONFIRM=skip-and-clean-before-2026-07-31T04:00:00.000Z \
+  corepack pnpm db:recovery-cleanup \
+  2026-07-31T04:00:00.000Z .env.production.local
+```
+
+The cleanup intentionally keeps users, encrypted SnapTrade secrets, broker
+authorizations, accounts, Telegram groups, privacy settings, and sync
+baselines. Pre-cutoff trade records remain as `BACKFILL/SKIPPED` dedupe guards,
+while their rendered `Alert` rows are removed.
+
 ### Rotating secrets
 
 - **Telegram bot token**: BotFather → `/revoke` → generate new → update `TELEGRAM_BOT_TOKEN` → re-run `setWebhook`.

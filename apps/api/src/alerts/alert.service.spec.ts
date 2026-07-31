@@ -1,4 +1,5 @@
 import { Decimal } from '@prisma/client/runtime/library';
+import { ConfigService } from '@nestjs/config';
 import { AlertService } from './alert.service';
 import { PrismaService } from '../config/prisma.service';
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
@@ -34,7 +35,11 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     };
   }
 
-  function makeService(opts: { sendImpl?: jest.Mock; member?: { alertsEnabled: boolean; privacyLevel: string } } = {}) {
+  function makeService(opts: {
+    sendImpl?: jest.Mock;
+    member?: { alertsEnabled: boolean; privacyLevel: string };
+    recoverySuppressBefore?: string;
+  } = {}) {
     const sentTexts: string[] = [];
     const prisma = {
       tradeEvent: {
@@ -58,7 +63,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       }),
       editMessageText: jest.fn(),
     } as unknown as TelegramService;
-    return { svc: new AlertService(prisma, telegram), prisma, telegram, sentTexts };
+    const config = {
+      get: jest.fn((key: string) => key === 'RECOVERY_SUPPRESS_BEFORE' ? opts.recoverySuppressBefore : undefined),
+    } as unknown as ConfigService;
+    return { svc: new AlertService(prisma, telegram, config), prisma, telegram, sentTexts };
   }
 
   it('does not resend events that are no longer pending', async () => {
@@ -102,6 +110,38 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       where: { id: 'trade-1' },
       data: expect.objectContaining({ alertStatus: 'PENDING', alertAttempts: { increment: 1 } }),
     });
+  });
+
+  it('blocks a pre-cutoff execution at the final Telegram delivery boundary', async () => {
+    const event = makeEvent({ tradeTime: new Date('2026-07-31T03:59:59.999Z') });
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({
+      sendImpl,
+      recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
+    });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({
+      where: { id: 'trade-1' },
+      data: { alertStatus: 'SKIPPED' },
+    });
+  });
+
+  it('allows an execution exactly at the recovery cutoff', async () => {
+    const event = makeEvent({ tradeTime: new Date('2026-07-31T04:00:00.000Z') });
+    const sendImpl = jest.fn().mockResolvedValue({ message_id: 1 });
+    const { svc, prisma } = makeService({
+      sendImpl,
+      recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
+    });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
+
+    expect(sendImpl).toHaveBeenCalledTimes(1);
   });
 
   it('escapes HTML special characters including quotes', async () => {
