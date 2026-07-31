@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AlertStatus, PrivacyLevel } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../config/prisma.service';
@@ -11,7 +12,11 @@ import { supportsProvisionalPositionAlerts } from '../broker/broker-freshness';
 @Injectable()
 export class AlertService {
   private readonly logger = new Logger(AlertService.name);
-  constructor(private prisma: PrismaService, private telegram: TelegramService) {}
+  constructor(
+    private prisma: PrismaService,
+    private telegram: TelegramService,
+    private config: ConfigService,
+  ) {}
 
   /**
    * Delivers one trade alert. Never throws: a failed send must not abort the
@@ -34,6 +39,11 @@ export class AlertService {
     }
     if (!await this.claimForDelivery(event)) {
       this.logger.log(`skipping trade ${event.id}; another worker already claimed it`);
+      return false;
+    }
+    if (this.isBeforeRecoveryCutoff(event.tradeTime)) {
+      this.logger.warn(`skipping trade ${event.id}; execution predates the recovery cutoff`);
+      await this.mark(event.id, 'SKIPPED');
       return false;
     }
     if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
@@ -109,6 +119,18 @@ export class AlertService {
     if (attempts >= ALERT.MAX_ATTEMPTS) return true;
     const anchor = event.tradeTime ?? event.createdAt;
     return Date.now() - anchor.getTime() > ALERT.MAX_AGE_MS;
+  }
+
+  /**
+   * Defense in depth for outage recovery. Import-time suppression prevents new
+   * backfill records from being queued; this final delivery check also blocks
+   * stale PENDING/SENDING rows that were already in Postgres before recovery.
+   */
+  private isBeforeRecoveryCutoff(tradeTime: Date): boolean {
+    const raw = this.config.get<string>('RECOVERY_SUPPRESS_BEFORE');
+    if (!raw) return false;
+    const cutoffMs = new Date(raw).getTime();
+    return Number.isFinite(cutoffMs) && tradeTime.getTime() < cutoffMs;
   }
 
   private isInferred(event: { rawStatus: string | null; rawType: string | null }): boolean {
