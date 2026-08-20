@@ -510,7 +510,7 @@ run_database_migrations() {
       TRADEPING_EXPECTED_PG_MAJOR="$EXPECTED_PG_MAJOR" \
       TRADEPING_EXPECTED_SOURCE_MB="$postgres_volume_size_mb" \
       TRADEPING_PG_CONNECT_TIMEOUT_SECONDS=10 \
-    -- sh -eu -c '
+    sh -eu -c '
       scripts/pg-backup.sh /dev/null "$1" >/dev/null
       : "${DATABASE_PUBLIC_URL:?DATABASE_PUBLIC_URL is required for local Railway migration execution}"
       export DATABASE_URL="$DATABASE_PUBLIC_URL"
