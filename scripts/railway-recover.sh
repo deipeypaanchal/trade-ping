@@ -1093,7 +1093,7 @@ echo "== Uploading exact API release $release_sha =="
   die "The workspace changed after cleanup. The cleanup is retry-safe; restore the exact clean release before rerunning."
 api_before_ids="$(deployment_ids_json "$api_service_id")"
 api_fail_closed_armed=true
-if ! railway up . \
+if ! railway up \
   --project "$PROJECT_ID" \
   --environment "$ENVIRONMENT_ID" \
   --service "$api_service_id" \
