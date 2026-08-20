@@ -24,7 +24,10 @@ export async function acquireUserSafetyLocks(
   for (const scope of ordered) {
     const key = `tradeping:user:${userId}:${scope}`;
     await tx.$queryRaw(Prisma.sql`
-      SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))
+      SELECT 1::integer AS acquired
+        FROM pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${key}, 0)
+        )
     `);
   }
 }
@@ -35,7 +38,10 @@ export async function acquireTelegramUpdateLock(
 ): Promise<void> {
   const key = `tradeping:telegram-update:${scopeKey}`;
   await tx.$queryRaw(Prisma.sql`
-    SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))
+    SELECT 1::integer AS acquired
+      FROM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(${key}, 0)
+      )
   `);
 }
 
@@ -45,7 +51,10 @@ export async function acquireGroupDeliveryLock(
 ): Promise<void> {
   const key = `tradeping:group:${groupId}:delivery`;
   await tx.$queryRaw(Prisma.sql`
-    SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))
+    SELECT 1::integer AS acquired
+      FROM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(${key}, 0)
+      )
   `);
 }
 
