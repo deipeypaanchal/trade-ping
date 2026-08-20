@@ -26,7 +26,7 @@ describe('validateEnv', () => {
   });
 
   it('rejects mock SnapTrade mode in production', () => {
-    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', SNAPTRADE_USE_MOCK: 'true' })).toThrow(/SNAPTRADE_USE_MOCK/);
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', TELEGRAM_BOT_USERNAME: 'tradeping_bot', SNAPTRADE_USE_MOCK: 'true' })).toThrow(/SNAPTRADE_USE_MOCK/);
   });
 
   it('requires the encryption key to decode to exactly 32 bytes', () => {
@@ -34,11 +34,21 @@ describe('validateEnv', () => {
   });
 
   it('requires https public urls in production', () => {
-    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', APP_BASE_URL: 'http://tradeping.example' })).toThrow(/APP_BASE_URL/);
-    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', SNAPTRADE_REDIRECT_URI: 'http://tradeping.example/snaptrade/callback' })).toThrow(/SNAPTRADE_REDIRECT_URI/);
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', TELEGRAM_BOT_USERNAME: 'tradeping_bot', APP_BASE_URL: 'http://tradeping.example' })).toThrow(/APP_BASE_URL/);
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production', TELEGRAM_BOT_USERNAME: 'tradeping_bot', SNAPTRADE_REDIRECT_URI: 'http://tradeping.example/snaptrade/callback' })).toThrow(/SNAPTRADE_REDIRECT_URI/);
+  });
+
+  it('requires a verified bot username in production', () => {
+    expect(() => validateEnv({ ...baseEnv, NODE_ENV: 'production' })).toThrow(/TELEGRAM_BOT_USERNAME/);
   });
 
   it('accepts an optional recovery suppression timestamp', () => {
     expect(validateEnv({ ...baseEnv, RECOVERY_SUPPRESS_BEFORE: '2026-07-06T05:00:00.000Z' }).RECOVERY_SUPPRESS_BEFORE).toBe('2026-07-06T05:00:00.000Z');
+  });
+
+  it('accepts only UUID Railway deployment identifiers', () => {
+    const deploymentId = '019c92ba-3e22-7c2a-a57c-89f03b330a51';
+    expect(validateEnv({ ...baseEnv, RAILWAY_DEPLOYMENT_ID: deploymentId }).RAILWAY_DEPLOYMENT_ID).toBe(deploymentId);
+    expect(() => validateEnv({ ...baseEnv, RAILWAY_DEPLOYMENT_ID: 'latest' })).toThrow(/RAILWAY_DEPLOYMENT_ID/);
   });
 });

@@ -1,5 +1,11 @@
 # TradePing — Detailed Code Review (Pre-Beta)
 
+> Historical snapshot: this document records an earlier review state. It is not
+> current deployment, migration, retention, or key-rotation guidance. Follow
+> `docs/DEPLOYMENT.md`, `docs/PRIVACY.md`, and `docs/LAUNCH_CHECKLIST.md` for the
+> live contract; the repository now includes forward migrations beyond the
+> initial schema.
+
 Reviewer: acting solo engineering team.
 Scope: full repo, with a focus on correctness under 10–25 concurrent beta users and forward-readiness for 100+.
 Method: line-by-line read of every source file, schema, config, and external API contract (SnapTrade + Telegram docs cross-checked).

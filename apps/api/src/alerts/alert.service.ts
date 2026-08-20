@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AlertStatus, PrivacyLevel } from '@prisma/client';
+import { AlertStatus, PrivacyLevel, Prisma } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../config/prisma.service';
 import { ALERT, TIME } from '../config/constants';
@@ -8,6 +8,7 @@ import { AssetType, contractMultiplier, isOptionSymbol } from '../broker/asset-t
 import { TelegramApiError, TelegramService } from '../telegram/telegram.service';
 import { RenderableTrade } from './alert.types';
 import { supportsProvisionalPositionAlerts } from '../broker/broker-freshness';
+import { acquireGroupDeliveryLock, acquireUserSafetyLocks, DELIVERY_FENCE_TRANSACTION } from '../security/user-safety-lock';
 
 @Injectable()
 export class AlertService {
@@ -41,49 +42,90 @@ export class AlertService {
       this.logger.log(`skipping trade ${event.id}; another worker already claimed it`);
       return false;
     }
+
+    // Start the wall-clock budget before opening the transaction so time spent
+    // waiting for either advisory lock is included. Telegram also receives this
+    // absolute cutoff, which prevents a Bottleneck-queued job from sending after
+    // the transaction that owns the safety fence can no longer commit.
+    const deliveryDeadlineAt = Date.now() + ALERT.DELIVERY_MAX_RUN_MS;
+
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        if (event.groupId) await acquireGroupDeliveryLock(tx, event.groupId);
+        await acquireUserSafetyLocks(tx, event.userId, ['delivery']);
+        return this.deliverClaimedEvent(event, tx, deliveryDeadlineAt);
+      }, DELIVERY_FENCE_TRANSACTION);
+    } catch (err) {
+      this.logger.warn(`delivery fence failed for trade ${event.id}: ${(err as Error).message}`);
+      await this.stampAttempt(event.id).catch(() => undefined);
+      return false;
+    }
+  }
+
+  private async deliverClaimedEvent(event: RenderableTrade, tx: Prisma.TransactionClient, deliveryDeadlineAt: number): Promise<boolean> {
     if (this.isBeforeRecoveryCutoff(event.tradeTime)) {
       this.logger.warn(`skipping trade ${event.id}; execution predates the recovery cutoff`);
-      await this.mark(event.id, 'SKIPPED');
+      await this.mark(event.id, 'SKIPPED', tx);
       return false;
     }
-    if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED'), false;
-    const member = await this.prisma.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
-    if (!member?.alertsEnabled || member.privacyLevel === 'OFF') return this.mark(event.id, 'SKIPPED'), false;
+    if (!event.groupId || !event.group) return this.mark(event.id, 'SKIPPED', tx), false;
+    const member = await tx.groupMember.findUnique({ where: { userId_groupId: { userId: event.userId, groupId: event.groupId } } });
+    if (
+      !member?.alertsEnabled
+      || member.privacyLevel === 'OFF'
+      || !member.sharingEnabledAt
+      || event.tradeTime <= member.sharingEnabledAt
+    ) {
+      return this.mark(event.id, 'SKIPPED', tx), false;
+    }
+    if (this.isInferred(event)) {
+      const currentGroup = await tx.group.findUnique({
+        where: { id: event.groupId },
+        select: { inferredAlertsEnabled: true },
+      });
+      // The event was loaded before acquiring the group fence. Never trust its
+      // cached group flag: /inferred off may have committed while this worker
+      // was waiting, and the command must be a final-send boundary.
+      if (!currentGroup?.inferredAlertsEnabled) {
+        await this.mark(event.id, 'SKIPPED', tx);
+        return false;
+      }
+      event.group.inferredAlertsEnabled = true;
+    }
     if (this.isInferred(event) && !this.isProvisional(event)) {
       this.logger.warn(`skipping inferred trade ${event.id}; holdings changes are diagnostic-only`);
-      await this.mark(event.id, 'SKIPPED');
+      await this.mark(event.id, 'SKIPPED', tx);
       return false;
     }
-    if (this.isProvisional(event) && await this.hasMatchingConfirmedExecution(event)) {
+    if (this.isProvisional(event) && await this.hasMatchingConfirmedExecution(event, tx)) {
       this.logger.log(`skipping provisional trade ${event.id}; matching confirmed execution already exists`);
-      await this.mark(event.id, 'SKIPPED');
+      await this.mark(event.id, 'SKIPPED', tx);
       return false;
     }
 
     if (this.isAlertExpired(event)) {
       this.logger.warn(`giving up on trade ${event.id} after ${event.alertAttempts ?? 0} attempt(s) / age cap`);
-      await this.markAndStampAttempt(event.id, 'SKIPPED');
+      await this.markAndStampAttempt(event.id, 'SKIPPED', tx);
       return false;
     }
 
     const text = this.render(event, member.privacyLevel);
-    if (!this.isInferred(event) && await this.tryUpgradeProvisional(event, text)) return true;
+    if (!this.isInferred(event) && await this.tryUpgradeProvisional(event, text, tx, deliveryDeadlineAt)) return true;
+    let sent: { message_id?: number };
     try {
-      const sent = await this.telegram.sendMessage(event.group.telegramChatId, text);
-      await this.prisma.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId, renderedText: text, messageId: sent.message_id ? String(sent.message_id) : undefined, sentAt: new Date() } });
-      await this.markAndStampAttempt(event.id, 'SENT');
-      return true;
+      sent = await this.telegram.sendMessage(event.group.telegramChatId, text, { deadlineAt: deliveryDeadlineAt });
     } catch (e) {
       const status = e instanceof TelegramApiError ? e.status : undefined;
       if (status && status >= 400 && status < 500 && status !== 429) {
         this.logger.warn(`permanent alert failure for trade ${event.id} (HTTP ${status}); marking SKIPPED`);
-        await this.markAndStampAttempt(event.id, 'SKIPPED');
+        await this.markAndStampAttempt(event.id, 'SKIPPED', tx);
         return false;
       }
       this.logger.warn(`transient alert failure for trade ${event.id}: ${(e as Error).message}; staying PENDING for retry`);
-      await this.stampAttempt(event.id);
+      await this.stampAttempt(event.id, tx);
       return false;
     }
+    return this.recordSent(event, text, sent.message_id, tx);
   }
 
   private isClaimable(event: { alertStatus: AlertStatus | string; lastAlertAttemptAt?: Date | null }): boolean {
@@ -143,10 +185,15 @@ export class AlertService {
       && supportsProvisionalPositionAlerts(event.account?.connection ?? {});
   }
 
-  private async tryUpgradeProvisional(event: RenderableTrade, text: string): Promise<boolean> {
+  private async tryUpgradeProvisional(
+    event: RenderableTrade,
+    text: string,
+    tx: Prisma.TransactionClient,
+    deliveryDeadlineAt: number,
+  ): Promise<boolean> {
     if (!event.groupId || !event.group || !event.account || !event.quantity) return false;
     const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
-    const provisional = await this.prisma.tradeEvent.findFirst({
+    const provisional = await tx.tradeEvent.findFirst({
       where: {
         userId: event.userId,
         groupId: event.groupId,
@@ -170,29 +217,31 @@ export class AlertService {
     const messageId = provisionalAlert?.messageId ? Number(provisionalAlert.messageId) : NaN;
     if (!provisional || !provisionalAlert || !Number.isInteger(messageId)) return false;
     try {
-      await this.telegram.editMessageText(event.group.telegramChatId, messageId, text);
+      await this.telegram.editMessageText(event.group.telegramChatId, messageId, text, { deadlineAt: deliveryDeadlineAt });
     } catch (err) {
       this.logger.warn(`could not upgrade provisional alert ${provisionalAlert.id}: ${(err as Error).message}; sending confirmed alert separately`);
       return false;
     }
-    await this.prisma.$transaction(async (tx) => {
-      await tx.alert.update({ where: { id: provisionalAlert.id }, data: { renderedText: text } });
-      await tx.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId!, renderedText: text, messageId: String(messageId), sentAt: new Date() } });
-      await tx.tradeEvent.update({
-        where: { id: event.id },
+    await tx.alert.update({ where: { id: provisionalAlert.id }, data: { renderedText: text } });
+    await tx.alert.create({ data: { tradeEventId: event.id, groupId: event.groupId!, renderedText: text, messageId: String(messageId), sentAt: new Date() } });
+    const finalized = await tx.tradeEvent.updateMany({
+        // A disable command fail-closes rows before waiting for this delivery
+        // fence. If Telegram already accepted the edit, preserve truthful sent
+        // history; the disabling command has not returned yet.
+        where: { id: event.id, alertStatus: { in: ['SENDING', 'SKIPPED'] } },
         data: { alertStatus: 'SENT', alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
-      });
-      await tx.auditLog.create({
-        data: { userId: event.userId, action: 'provisional_alert_upgraded', metadata: { provisionalTradeEventId: provisional.id, confirmedTradeEventId: event.id, messageId } },
-      });
+    });
+    if (finalized.count !== 1) throw new Error(`delivery claim for ${event.id} was no longer active`);
+    await tx.auditLog.create({
+      data: { userId: event.userId, action: 'provisional_alert_upgraded', metadata: { provisionalTradeEventId: provisional.id, confirmedTradeEventId: event.id, messageId } },
     });
     return true;
   }
 
-  private async hasMatchingConfirmedExecution(event: RenderableTrade): Promise<boolean> {
+  private async hasMatchingConfirmedExecution(event: RenderableTrade, tx: Prisma.TransactionClient): Promise<boolean> {
     if (!event.groupId || !event.account || !event.quantity) return false;
     const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
-    return (await this.prisma.tradeEvent.count({
+    return (await tx.tradeEvent.count({
       where: {
         userId: event.userId,
         groupId: event.groupId,
@@ -210,22 +259,43 @@ export class AlertService {
     })) > 0;
   }
 
-  private async mark(id: string, status: AlertStatus) {
-    await this.prisma.tradeEvent.update({ where: { id }, data: { alertStatus: status } });
+  private async mark(id: string, status: AlertStatus, tx: Prisma.TransactionClient = this.prisma) {
+    await tx.tradeEvent.updateMany({ where: { id, alertStatus: 'SENDING' }, data: { alertStatus: status } });
   }
 
-  private async markAndStampAttempt(id: string, status: AlertStatus) {
-    await this.prisma.tradeEvent.update({
-      where: { id },
+  private async markAndStampAttempt(id: string, status: AlertStatus, tx: Prisma.TransactionClient = this.prisma) {
+    await tx.tradeEvent.updateMany({
+      where: { id, alertStatus: 'SENDING' },
       data: { alertStatus: status, alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
     });
   }
 
-  private async stampAttempt(id: string) {
-    await this.prisma.tradeEvent.update({
-      where: { id },
+  private async stampAttempt(id: string, tx: Prisma.TransactionClient = this.prisma) {
+    await tx.tradeEvent.updateMany({
+      where: { id, alertStatus: 'SENDING' },
       data: { alertStatus: 'PENDING', alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
     });
+  }
+
+  private async recordSent(event: RenderableTrade, text: string, messageId: number | undefined, tx: Prisma.TransactionClient): Promise<boolean> {
+    const finalized = await tx.tradeEvent.updateMany({
+        where: { id: event.id, alertStatus: { in: ['SENDING', 'SKIPPED'] } },
+        data: { alertStatus: 'SENT', alertAttempts: { increment: 1 }, lastAlertAttemptAt: new Date() },
+    });
+    if (finalized.count !== 1) {
+      this.logger.error(`Telegram accepted trade ${event.id}, but its delivery claim was no longer active`);
+      return false;
+    }
+    await tx.alert.create({
+      data: {
+        tradeEventId: event.id,
+        groupId: event.groupId!,
+        renderedText: text,
+        messageId: messageId ? String(messageId) : undefined,
+        sentAt: new Date(),
+      },
+    });
+    return true;
   }
 
   private render(event: RenderableTrade, level: PrivacyLevel): string {

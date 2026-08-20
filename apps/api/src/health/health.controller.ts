@@ -60,6 +60,7 @@ export class HealthController {
       startedAt: this.startedAt.toISOString(),
       uptimeSeconds: Math.floor(process.uptime()),
       release: this.config.get<string>('RELEASE_SHA') || null,
+      deploymentId: this.config.get<string>('RAILWAY_DEPLOYMENT_ID') || null,
     };
   }
 }

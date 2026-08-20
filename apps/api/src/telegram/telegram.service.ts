@@ -1,10 +1,18 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Bottleneck from 'bottleneck';
-import { LIMITS } from '../config/constants';
+import { ALERT, LIMITS } from '../config/constants';
 
 export type TelegramReplyMarkup = {
   inline_keyboard: Array<Array<{ text: string; url: string }>>;
+};
+
+export type TelegramMessageOptions = {
+  replyMarkup?: TelegramReplyMarkup;
+  /** Absolute wall-clock cutoff. A queued job is rejected and cannot send once reached. */
+  deadlineAt?: number;
+  /** Optional caller cancellation, combined with the absolute deadline. */
+  signal?: AbortSignal;
 };
 
 export class TelegramApiError extends Error {
@@ -64,6 +72,7 @@ export class TelegramService implements OnModuleInit {
       return;
     }
     try {
+      await this.verifyBotIdentity();
       await this.setWebhook();
       await this.setMyCommands();
       this.logger.log('Telegram webhook and command menu registered');
@@ -72,12 +81,33 @@ export class TelegramService implements OnModuleInit {
     }
   }
 
-  async sendMessage(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup } = {}): Promise<{ message_id?: number }> {
-    return this.perChat.key(chatId).schedule(() => this.doSend(chatId, text, options, 0));
+  async sendMessage(chatId: string, text: string, options: TelegramMessageOptions = {}): Promise<{ message_id?: number }> {
+    const signal = this.operationSignal({
+      ...options,
+      deadlineAt: options.deadlineAt ?? Date.now() + ALERT.DELIVERY_MAX_RUN_MS,
+    });
+    signal?.throwIfAborted();
+    const scheduled = this.perChat.key(chatId).schedule(async () => {
+      // Bottleneck can legally retain a job while its reservoir is empty. The
+      // absolute signal makes a job that starts after its owning DB fence a
+      // no-op instead of a late Telegram send.
+      signal?.throwIfAborted();
+      return this.doSend(chatId, text, options, 0, signal);
+    });
+    return this.awaitWithSignal(scheduled, signal);
   }
 
-  async editMessageText(chatId: string, messageId: number, text: string): Promise<void> {
-    return this.perChat.key(chatId).schedule(() => this.doEdit(chatId, messageId, text, 0));
+  async editMessageText(chatId: string, messageId: number, text: string, options: Omit<TelegramMessageOptions, 'replyMarkup'> = {}): Promise<void> {
+    const signal = this.operationSignal({
+      ...options,
+      deadlineAt: options.deadlineAt ?? Date.now() + ALERT.DELIVERY_MAX_RUN_MS,
+    });
+    signal?.throwIfAborted();
+    const scheduled = this.perChat.key(chatId).schedule(async () => {
+      signal?.throwIfAborted();
+      return this.doEdit(chatId, messageId, text, 0, signal);
+    });
+    return this.awaitWithSignal(scheduled, signal);
   }
 
   async setWebhook(): Promise<void> {
@@ -86,7 +116,17 @@ export class TelegramService implements OnModuleInit {
     const secret = this.config.get<string>('TELEGRAM_WEBHOOK_SECRET');
     const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url, secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true }),
+      // Never drop queued updates during routine deploys. A queued /privacy off
+      // or /disconnect request is safety-sensitive and must survive restarts.
+      body: JSON.stringify({
+        url,
+        secret_token: secret,
+        allowed_updates: ['message', 'my_chat_member'],
+        // Serial delivery plus the durable update cursor prevents an older
+        // consent command from overtaking a newer safety command.
+        max_connections: 1,
+      }),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new TelegramApiError(`Telegram setWebhook failed: ${res.status} ${await res.text()}`, res.status);
   }
@@ -96,17 +136,19 @@ export class TelegramService implements OnModuleInit {
     // service account. The webhook secret prevents callers from spoofing it.
     if (userId === '1087968824') return true;
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/getChatMember`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, user_id: userId }),
-      });
-      if (!res.ok) return false;
-      const json = await res.json() as { result?: { status?: string } };
-      return json.result?.status === 'creator' || json.result?.status === 'administrator';
-    } catch {
-      return false;
+    const res = await fetch(`https://api.telegram.org/bot${token}/getChatMember`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, user_id: userId }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      throw new TelegramApiError(`Telegram getChatMember failed: ${res.status} ${await res.text()}`, res.status);
     }
+    const json = await res.json() as { result?: { status?: string } };
+    if (!json.result?.status) {
+      throw new TelegramApiError('Telegram getChatMember returned no member status', 502);
+    }
+    return json.result.status === 'creator' || json.result.status === 'administrator';
   }
 
   /** Publishes the slash-command menu users see in the Telegram UI. */
@@ -118,22 +160,30 @@ export class TelegramService implements OnModuleInit {
       { command: 'privacy', description: 'Set alert privacy: public, normal, private, off' },
       { command: 'trust', description: 'What is bot, user, and group level' },
       { command: 'diagnostics', description: 'Explain latest sync and broker freshness' },
-      { command: 'groupstatus', description: 'Show group setup and alert health' },
+      { command: 'groupstatus', description: 'Admin: aggregate group alert health' },
       { command: 'setup', description: 'Post group onboarding instructions' },
       { command: 'status', description: 'Show your brokerage connection status' },
       { command: 'sync', description: 'Manual backup sync' },
       { command: 'inferred', description: 'Admin: provisional Robinhood holdings alerts' },
-      { command: 'disconnect', description: 'Remove your brokerage connections' },
+      { command: 'disconnect', description: 'DM: revoke all brokerage connections' },
       { command: 'help', description: 'How TradePing works' },
     ];
     const res = await fetch(`https://api.telegram.org/bot${token}/setMyCommands`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ commands }),
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new TelegramApiError(`Telegram setMyCommands failed: ${res.status} ${await res.text()}`, res.status);
   }
 
-  private async doSend(chatId: string, text: string, options: { replyMarkup?: TelegramReplyMarkup }, attempt: number): Promise<{ message_id?: number }> {
+  private async doSend(
+    chatId: string,
+    text: string,
+    options: TelegramMessageOptions,
+    attempt: number,
+    signal?: AbortSignal,
+  ): Promise<{ message_id?: number }> {
+    signal?.throwIfAborted();
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -144,31 +194,34 @@ export class TelegramService implements OnModuleInit {
         disable_web_page_preview: true,
         ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
       }),
+      signal: this.requestSignal(signal),
     });
     const body = await res.text();
     if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
       const retryAfterSec = this.retryAfter(body);
       this.logger.warn(`Telegram 429 for chat ${chatId}; retrying in ${retryAfterSec}s`);
-      await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
-      return this.doSend(chatId, text, options, attempt + 1);
+      await this.abortableDelay((retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000, signal);
+      return this.doSend(chatId, text, options, attempt + 1, signal);
     }
     if (!res.ok) throw new TelegramApiError(`Telegram sendMessage failed: ${res.status} ${body}`, res.status);
     const json = JSON.parse(body) as { result?: { message_id: number } };
     return { message_id: json.result?.message_id };
   }
 
-  private async doEdit(chatId: string, messageId: number, text: string, attempt: number): Promise<void> {
+  private async doEdit(chatId: string, messageId: number, text: string, attempt: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
     const res = await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+      signal: this.requestSignal(signal),
     });
     const body = await res.text();
     if (res.status === 429 && attempt < LIMITS.TELEGRAM_MAX_RETRIES) {
       const retryAfterSec = this.retryAfter(body);
       this.logger.warn(`Telegram 429 editing chat ${chatId}; retrying in ${retryAfterSec}s`);
-      await new Promise((r) => setTimeout(r, (retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000));
-      return this.doEdit(chatId, messageId, text, attempt + 1);
+      await this.abortableDelay((retryAfterSec + LIMITS.TELEGRAM_RETRY_AFTER_PADDING_S) * 1000, signal);
+      return this.doEdit(chatId, messageId, text, attempt + 1, signal);
     }
     // A retry after a DB error may edit a message that already has the final
     // text. Telegram reports that idempotent state as HTTP 400.
@@ -179,9 +232,73 @@ export class TelegramService implements OnModuleInit {
   private retryAfter(body: string): number {
     try {
       const retryAfter = (JSON.parse(body)?.parameters?.retry_after as number) || 1;
-      return Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter : 1;
+      return Number.isFinite(retryAfter) && retryAfter >= 0
+        ? Math.min(retryAfter, LIMITS.TELEGRAM_MAX_RETRY_AFTER_S)
+        : 1;
     } catch {
       return 1;
     }
+  }
+
+  private operationSignal(options: Pick<TelegramMessageOptions, 'deadlineAt' | 'signal'>): AbortSignal | undefined {
+    const signals: AbortSignal[] = [];
+    if (options.signal) signals.push(options.signal);
+    if (options.deadlineAt !== undefined) {
+      const remainingMs = options.deadlineAt - Date.now();
+      signals.push(remainingMs > 0
+        ? AbortSignal.timeout(remainingMs)
+        : AbortSignal.abort(new Error('Telegram operation deadline exceeded')));
+    }
+    if (!signals.length) return undefined;
+    return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+  }
+
+  private requestSignal(operationSignal?: AbortSignal): AbortSignal {
+    const requestTimeout = AbortSignal.timeout(LIMITS.TELEGRAM_REQUEST_TIMEOUT_MS);
+    return operationSignal ? AbortSignal.any([operationSignal, requestTimeout]) : requestTimeout;
+  }
+
+  private async awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    signal.throwIfAborted();
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(signal.reason ?? new Error('Telegram operation aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
+  }
+
+  private async abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    signal.throwIfAborted();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error('Telegram operation aborted'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async verifyBotIdentity(): Promise<void> {
+    const token = this.config.getOrThrow<string>('TELEGRAM_BOT_TOKEN');
+    const configured = this.config.get<string>('TELEGRAM_BOT_USERNAME')?.replace(/^@/, '').toLowerCase();
+    if (!configured && this.config.get<string>('NODE_ENV') === 'production') {
+      throw new Error('TELEGRAM_BOT_USERNAME is required in production');
+    }
+    const response = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await response.json() as { ok?: boolean; result?: { username?: string } };
+    const actual = payload.result?.username?.toLowerCase();
+    if (!response.ok || !payload.ok || !actual) throw new TelegramApiError(`Telegram getMe failed: ${response.status}`, response.status);
+    if (configured && actual !== configured) throw new Error(`TELEGRAM_BOT_USERNAME does not match getMe (${actual})`);
   }
 }

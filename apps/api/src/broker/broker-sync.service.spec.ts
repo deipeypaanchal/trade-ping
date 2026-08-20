@@ -1,5 +1,50 @@
-import { BrokerSyncService } from './broker-sync.service';
+import { BrokerSyncService, SyncDeadlineExceededError } from './broker-sync.service';
+import { SYNC } from '../config/constants';
 import { PositionSnapshotEntry, TradeDetectorService } from './trade-detector.service';
+
+type TestMembership = {
+  groupId: string;
+  privacyLevel: string;
+  alertsEnabled: boolean;
+  sharingEnabledAt: Date;
+  group?: { inferredAlertsEnabled: boolean };
+};
+
+type FenceablePrismaMock = {
+  user?: { findUnique?: jest.Mock; [key: string]: unknown };
+  [key: string]: unknown;
+};
+
+function withSyncFence<T extends FenceablePrismaMock>(prisma: T) {
+  const fenced = prisma as T & { $queryRaw: jest.Mock; $transaction: jest.Mock };
+  fenced.$queryRaw = jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]);
+  fenced.$transaction = jest.fn(async (callback: (tx: typeof fenced) => Promise<unknown>) => callback(fenced));
+  if (fenced.user && !fenced.user.findUnique) {
+    fenced.user.findUnique = jest.fn().mockResolvedValue({ brokerSyncEnabled: true });
+  }
+  return fenced;
+}
+
+function withPositionFence<T extends FenceablePrismaMock>(
+  prisma: T,
+  currentConsentAt = new Date(0),
+) {
+  const fenced = withSyncFence(prisma) as unknown as T & {
+    groupMember: { findUnique: jest.Mock };
+    group: { findUnique: jest.Mock };
+  };
+  fenced.groupMember = {
+    findUnique: jest.fn().mockResolvedValue({
+      alertsEnabled: true,
+      privacyLevel: 'NORMAL',
+      sharingEnabledAt: currentConsentAt,
+    }),
+  };
+  fenced.group = {
+    findUnique: jest.fn().mockResolvedValue({ inferredAlertsEnabled: true }),
+  };
+  return fenced;
+}
 
 describe('BrokerSyncService position-delta guards', () => {
   const svc = new BrokerSyncService(null as never, null as never, null as never, null as never, null as never, null as never) as unknown as {
@@ -63,7 +108,7 @@ describe('BrokerSyncService position-delta guards', () => {
   });
 
   it('records position deltas without sending group alerts', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
           value: {
@@ -77,7 +122,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
       },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn() };
     const svc = new BrokerSyncService(
       prisma as never,
@@ -91,13 +136,15 @@ describe('BrokerSyncService position-delta guards', () => {
         userId: string,
         dbAccountId: string,
         providerAccountId: string,
-        memberships: { groupId: string }[],
+        memberships: TestMembership[],
         positions: unknown[],
         suppressBackfill: boolean,
       ): Promise<{ created: number; alerted: number }>;
     };
 
-    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1' }], [
+    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0),
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false);
 
@@ -109,7 +156,7 @@ describe('BrokerSyncService position-delta guards', () => {
   });
 
   it('schedules an opted-in Robinhood position delta after a grace period', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
           value: {
@@ -124,7 +171,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
       },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn().mockResolvedValue(true) };
     const queue = { add: jest.fn().mockResolvedValue({}) };
     const svc = new BrokerSyncService(
@@ -140,7 +187,7 @@ describe('BrokerSyncService position-delta guards', () => {
         userId: string,
         dbAccountId: string,
         providerAccountId: string,
-        memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
+        memberships: TestMembership[],
         positions: unknown[],
         suppressBackfill: boolean,
         broker: { brokerageName?: string },
@@ -148,7 +195,9 @@ describe('BrokerSyncService position-delta guards', () => {
       ): Promise<{ created: number; alerted: number }>;
     };
 
-    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0), group: { inferredAlertsEnabled: true },
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Robinhood' }, true);
 
@@ -163,8 +212,173 @@ describe('BrokerSyncService position-delta guards', () => {
     }));
   });
 
+  it('drops a position delta when the current consent epoch is newer than its baseline', async () => {
+    const baselineAt = new Date('2026-08-11T15:00:00.000Z');
+    const reenabledAt = new Date('2026-08-11T15:05:00.000Z');
+    const prisma = withPositionFence({
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({
+          value: {
+            at: baselineAt.toISOString(),
+            positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
+          },
+        }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: {
+        count: jest.fn().mockResolvedValue(0),
+        upsert: jest.fn(),
+      },
+      auditLog: { create: jest.fn() },
+    }, reenabledAt);
+    const queue = { add: jest.fn() };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      new TradeDetectorService(),
+      { sendTradeAlert: jest.fn() } as never,
+      null as never,
+      queue as never,
+    ) as unknown as {
+      syncPositionDeltas(
+        userId: string,
+        dbAccountId: string,
+        providerAccountId: string,
+        memberships: TestMembership[],
+        positions: unknown[],
+        suppressBackfill: boolean,
+        broker: { brokerageName?: string },
+        ordersComplete: boolean,
+      ): Promise<{ created: number; alerted: number }>;
+    };
+
+    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1',
+      privacyLevel: 'NORMAL',
+      alertsEnabled: true,
+      sharingEnabledAt: new Date(0),
+      group: { inferredAlertsEnabled: true },
+    }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true)).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(prisma.groupMember.findUnique).toHaveBeenCalled();
+    expect(prisma.tradeEvent.upsert).not.toHaveBeenCalled();
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('requires a position baseline strictly after the current consent epoch', async () => {
+    const epoch = new Date();
+    const prisma = withPositionFence({
+      syncState: {
+        findUnique: jest.fn().mockResolvedValue({
+          value: {
+            at: epoch.toISOString(),
+            positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
+          },
+        }),
+        upsert: jest.fn(),
+      },
+      tradeEvent: { count: jest.fn(), upsert: jest.fn() },
+      auditLog: { create: jest.fn() },
+    }, epoch);
+    const queue = { add: jest.fn() };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      new TradeDetectorService(),
+      { sendTradeAlert: jest.fn() } as never,
+      null as never,
+      queue as never,
+    ) as unknown as {
+      syncPositionDeltas(
+        userId: string,
+        dbAccountId: string,
+        providerAccountId: string,
+        memberships: TestMembership[],
+        positions: unknown[],
+        suppressBackfill: boolean,
+        broker: { brokerageName?: string },
+        ordersComplete: boolean,
+      ): Promise<{ created: number; alerted: number }>;
+    };
+
+    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: epoch,
+    }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true)).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(prisma.syncState.findUnique).toHaveBeenCalledTimes(2);
+    expect(prisma.tradeEvent.upsert).not.toHaveBeenCalled();
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('refreshes baseline age behind the delivery fence before allowing a provisional alert', async () => {
+    const freshAt = new Date();
+    const staleAt = new Date(freshAt.getTime() - 60 * 60_000);
+    const snapshot = (at: Date) => ({
+      value: {
+        at: at.toISOString(),
+        positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }],
+      },
+    });
+    const prisma = withPositionFence({
+      syncState: {
+        findUnique: jest.fn()
+          .mockResolvedValueOnce(snapshot(freshAt))
+          .mockResolvedValueOnce(snapshot(staleAt)),
+        upsert: jest.fn(),
+      },
+      tradeEvent: {
+        count: jest.fn().mockResolvedValue(0),
+        upsert: jest.fn().mockImplementation(async (args: { create: { alertStatus: string } }) => ({
+          id: 'trade-1',
+          createdAt: new Date(Date.now() + 60_000),
+          alertStatus: args.create.alertStatus,
+        })),
+      },
+      auditLog: { create: jest.fn() },
+    });
+    const queue = { add: jest.fn() };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      new TradeDetectorService(),
+      { sendTradeAlert: jest.fn() } as never,
+      null as never,
+      queue as never,
+    ) as unknown as {
+      syncPositionDeltas(
+        userId: string,
+        dbAccountId: string,
+        providerAccountId: string,
+        memberships: TestMembership[],
+        positions: unknown[],
+        suppressBackfill: boolean,
+        broker: { brokerageName?: string },
+        ordersComplete: boolean,
+      ): Promise<{ created: number; alerted: number }>;
+    };
+
+    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0),
+    }], [
+      { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
+    ], false, { brokerageName: 'Robinhood' }, true)).resolves.toEqual({ created: 1, alerted: 0 });
+
+    expect(prisma.syncState.findUnique).toHaveBeenCalledTimes(2);
+    expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ alertStatus: 'SKIPPED' }),
+    }));
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
   it('keeps provisional deltas pending when delayed alert scheduling fails', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({
           value: {
@@ -179,7 +393,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'PENDING' }),
       },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn() };
     const queue = { add: jest.fn().mockRejectedValue(new Error('redis unavailable')) };
     const svc = new BrokerSyncService(
@@ -195,7 +409,7 @@ describe('BrokerSyncService position-delta guards', () => {
         userId: string,
         dbAccountId: string,
         providerAccountId: string,
-        memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
+        memberships: TestMembership[],
         positions: unknown[],
         suppressBackfill: boolean,
         broker: { brokerageName?: string },
@@ -203,7 +417,9 @@ describe('BrokerSyncService position-delta guards', () => {
       ): Promise<{ created: number; alerted: number }>;
     };
 
-    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+    await expect(svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0), group: { inferredAlertsEnabled: true },
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Robinhood' }, true)).resolves.toEqual({ created: 1, alerted: 0 });
 
@@ -214,20 +430,22 @@ describe('BrokerSyncService position-delta guards', () => {
   });
 
   it('keeps Fidelity position deltas diagnostic-only even when the group opted in', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({ value: { at: new Date().toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
         upsert: jest.fn(),
       },
       tradeEvent: { count: jest.fn().mockResolvedValue(0), upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }) },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn() };
     const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
-      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: TestMembership[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
     };
 
-    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+    const result = await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0), group: { inferredAlertsEnabled: true },
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Fidelity' }, true);
 
@@ -236,7 +454,7 @@ describe('BrokerSyncService position-delta guards', () => {
   });
 
   it('does not post a provisional duplicate when a matching confirmed execution exists', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({ value: { at: new Date().toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
         upsert: jest.fn(),
@@ -246,13 +464,15 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }),
       },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn() };
     const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
-      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: TestMembership[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
     };
 
-    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0), group: { inferredAlertsEnabled: true },
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Robinhood' }, true);
 
@@ -261,20 +481,22 @@ describe('BrokerSyncService position-delta guards', () => {
   });
 
   it('keeps an opted-in Robinhood delta diagnostic-only when its baseline is stale', async () => {
-    const prisma = {
+    const prisma = withPositionFence({
       syncState: {
         findUnique: jest.fn().mockResolvedValue({ value: { at: new Date(Date.now() - 60 * 60_000).toISOString(), positions: [{ symbol: 'AAPL', symbolId: 'sym-aapl', quantity: 1, price: 100, currency: 'USD' }] } }),
         upsert: jest.fn(),
       },
       tradeEvent: { count: jest.fn().mockResolvedValue(0), upsert: jest.fn().mockResolvedValue({ id: 'trade-1', createdAt: new Date(Date.now() + 60_000), alertStatus: 'SKIPPED' }) },
       auditLog: { create: jest.fn() },
-    };
+    });
     const alerts = { sendTradeAlert: jest.fn() };
     const svc = new BrokerSyncService(prisma as never, null as never, null as never, new TradeDetectorService(), alerts as never, null as never) as unknown as {
-      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
+      syncPositionDeltas(userId: string, dbAccountId: string, providerAccountId: string, memberships: TestMembership[], positions: unknown[], suppressBackfill: boolean, broker: { brokerageName?: string }, ordersComplete: boolean): Promise<{ created: number; alerted: number }>;
     };
 
-    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }], [
+    await svc.syncPositionDeltas('user-1', 'db-account-1', 'provider-account-1', [{
+      groupId: 'group-1', privacyLevel: 'NORMAL', alertsEnabled: true, sharingEnabledAt: new Date(0), group: { inferredAlertsEnabled: true },
+    }], [
       { instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' },
     ], false, { brokerageName: 'Robinhood' }, true);
 
@@ -297,23 +519,337 @@ describe('BrokerSyncService position-delta guards', () => {
       null as never,
       config as never,
     ) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
+      fetchOrders(db: unknown, userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: [] });
+    await expect(svc.fetchOrders(prisma, 'user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: [] });
     expect(prisma.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ action: 'broker_sync_orders_failed' }),
     }));
   });
 
-  it('allows provisional position processing when recent orders fail but historical orders succeed', async () => {
-    const prisma = {
+  it('loads only group destinations with explicit active consent', async () => {
+    const prisma = withSyncFence({
       user: {
         findUniqueOrThrow: jest.fn().mockResolvedValue({
           id: 'user-1',
+          brokerSyncEnabled: false,
+          snaptradeUserId: null,
+          encryptedUserSecret: null,
+          memberships: [],
+        }),
+      },
+    });
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+
+    await expect(svc.syncUser('user-1')).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(prisma.user.findUniqueOrThrow).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      include: {
+        memberships: {
+          where: {
+            alertsEnabled: true,
+            privacyLevel: { not: 'OFF' },
+            sharingEnabledAt: { not: null },
+            group: { telegramChatId: { startsWith: '-' } },
+          },
+          include: { group: { select: { inferredAlertsEnabled: true } } },
+        },
+      },
+    });
+  });
+
+  it('uses the lock-owning transaction client for protected sync reads', async () => {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'user-1',
+          brokerSyncEnabled: false,
+          snaptradeUserId: null,
+          encryptedUserSecret: null,
+          memberships: [],
+        }),
+      },
+    };
+    const prisma = {
+      user: { findUniqueOrThrow: jest.fn() },
+      $transaction: jest.fn(async (callback: (db: typeof tx) => Promise<unknown>) => callback(tx)),
+    };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+
+    await expect(svc.syncUser('user-1')).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(tx.user.findUniqueOrThrow).toHaveBeenCalledTimes(1);
+    expect(prisma.user.findUniqueOrThrow).not.toHaveBeenCalled();
+  });
+
+  it('counts advisory-lock wait against the sync deadline and starts no provider work after expiry', async () => {
+    const startedAt = new Date('2026-08-11T16:00:00.000Z').getTime();
+    const now = jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(startedAt)
+      .mockReturnValue(startedAt + SYNC.MAX_RUN_MS);
+    const prisma = withSyncFence({
+      user: {
+        findUniqueOrThrow: jest.fn(),
+      },
+    });
+    const snap = { listConnections: jest.fn() };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      null as never,
+      snap as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+
+    try {
+      await expect(svc.syncUser('user-1')).rejects.toBeInstanceOf(SyncDeadlineExceededError);
+      expect(prisma.user.findUniqueOrThrow).not.toHaveBeenCalled();
+      expect(snap.listConnections).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not contact the broker when the durable sync kill switch is off', async () => {
+    const prisma = withSyncFence({
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'user-1',
+          brokerSyncEnabled: false,
           snaptradeUserId: 'snap-user-1',
           encryptedUserSecret: 'encrypted-secret',
-          memberships: [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }],
+          memberships: [{
+            groupId: 'group-a',
+            privacyLevel: 'NORMAL',
+            alertsEnabled: true,
+            sharingEnabledAt: new Date(0),
+            group: { inferredAlertsEnabled: false },
+          }],
+        }),
+      },
+    });
+    const crypto = { decrypt: jest.fn() };
+    const snap = { listConnections: jest.fn() };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      crypto as never,
+      snap as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+
+    await expect(svc.syncUser('user-1')).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(crypto.decrypt).not.toHaveBeenCalled();
+    expect(snap.listConnections).not.toHaveBeenCalled();
+  });
+
+  it('holds the sync fence and stops before local writes when the durable gate closes mid-sync', async () => {
+    const prisma = withSyncFence({
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'user-1',
+          brokerSyncEnabled: true,
+          snaptradeUserId: 'snap-user-1',
+          encryptedUserSecret: 'encrypted-secret',
+          memberships: [],
+        }),
+        findUnique: jest.fn().mockResolvedValue({ brokerSyncEnabled: false }),
+      },
+      brokerConnection: {
+        updateMany: jest.fn(),
+        upsert: jest.fn(),
+      },
+      auditLog: { create: jest.fn() },
+    });
+    const crypto = { decrypt: jest.fn().mockReturnValue('secret') };
+    const snap = { listConnections: jest.fn().mockResolvedValue([{ id: 'authorization-1' }]) };
+    const svc = new BrokerSyncService(
+      prisma as never,
+      crypto as never,
+      snap as never,
+      null as never,
+      null as never,
+      null as never,
+    );
+
+    await expect(svc.syncUser('user-1')).resolves.toEqual({ created: 0, alerted: 0 });
+
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect((prisma.$queryRaw as jest.Mock).mock.invocationCallOrder[0])
+      .toBeLessThan(snap.listConnections.mock.invocationCallOrder[0]);
+    expect(prisma.user.findUnique).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      select: { brokerSyncEnabled: true },
+    });
+    expect(prisma.brokerConnection.updateMany).not.toHaveBeenCalled();
+    expect(prisma.brokerConnection.upsert).not.toHaveBeenCalled();
+  });
+
+  it('creates group events only for executions strictly after consent', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-11T15:05:00.000Z'));
+    try {
+      const order = {
+        brokerage_order_id: 'order-1',
+        status: 'EXECUTED',
+        action: 'BUY',
+        universal_symbol: { symbol: 'AAPL' },
+        filled_quantity: 1,
+        average_fill_price: 200,
+        filled_date: '2026-08-11T15:00:00.000Z',
+      };
+      const memberships = [
+        {
+          groupId: 'group-consented-before-trade',
+          privacyLevel: 'NORMAL',
+          alertsEnabled: true,
+          sharingEnabledAt: new Date('2026-08-11T14:00:00.000Z'),
+          group: { inferredAlertsEnabled: false },
+        },
+        {
+          groupId: 'group-consented-after-trade',
+          privacyLevel: 'NORMAL',
+          alertsEnabled: true,
+          sharingEnabledAt: new Date('2026-08-11T16:00:00.000Z'),
+          group: { inferredAlertsEnabled: false },
+        },
+        {
+          groupId: 'group-consented-at-trade',
+          privacyLevel: 'PRIVATE',
+          alertsEnabled: true,
+          sharingEnabledAt: new Date('2026-08-11T15:00:00.000Z'),
+          group: { inferredAlertsEnabled: false },
+        },
+      ];
+      const prisma = withSyncFence({
+        user: {
+          findUniqueOrThrow: jest.fn().mockResolvedValue({
+            id: 'user-1',
+            brokerSyncEnabled: true,
+            snaptradeUserId: 'snap-user-1',
+            encryptedUserSecret: 'encrypted-secret',
+            memberships,
+          }),
+        },
+        brokerConnection: {
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+          upsert: jest.fn().mockResolvedValue({
+            id: 'connection-1',
+            brokerageName: 'Robinhood',
+            brokerageSlug: 'ROBINHOOD',
+          }),
+        },
+        brokerAccount: {
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+          upsert: jest.fn().mockResolvedValue({ id: 'account-1' }),
+        },
+        syncState: {
+          findUnique: jest.fn().mockImplementation(async (args: { where: { userId_accountId_key: { key: string } } }) => {
+            if (args.where.userId_accountId_key.key === 'last_successful_order_sync') {
+              return { value: { at: '2026-08-11T14:55:00.000Z' } };
+            }
+            return { value: { at: '2026-08-11T14:55:00.000Z', positions: [] } };
+          }),
+          upsert: jest.fn().mockResolvedValue({}),
+        },
+        tradeEvent: {
+          upsert: jest.fn().mockImplementation(async (args: { create: { groupId: string; alertStatus: string } }) => ({
+            id: `trade-${args.create.groupId}`,
+            groupId: args.create.groupId,
+            alertStatus: args.create.alertStatus,
+            createdAt: new Date(),
+          })),
+        },
+        auditLog: { create: jest.fn().mockResolvedValue({}) },
+      });
+      const snap = {
+        listConnections: jest.fn().mockResolvedValue([{
+          id: 'authorization-1',
+          disabled: false,
+          type: 'read',
+          brokerage: { display_name: 'Robinhood', slug: 'ROBINHOOD' },
+        }]),
+        listAccounts: jest.fn().mockResolvedValue([{ id: 'provider-account-1', raw_type: 'INDIVIDUAL' }]),
+        listRecentAccountOrders: jest.fn().mockResolvedValue([order]),
+        listAccountOrders: jest.fn().mockResolvedValue([order]),
+        listAccountPositions: jest.fn().mockResolvedValue([]),
+      };
+      const crypto = {
+        decrypt: jest.fn().mockReturnValue('secret'),
+        hash: jest.fn().mockReturnValue('account-name-hash'),
+      };
+      const alerts = { sendTradeAlert: jest.fn().mockResolvedValue(true) };
+      const config = {
+        get: jest.fn().mockReturnValue(undefined),
+        getOrThrow: jest.fn((key: string) => key === 'BACKFILL_SUPPRESS_HOURS' ? 48 : 3),
+      };
+      const svc = new BrokerSyncService(
+        prisma as never,
+        crypto as never,
+        snap as never,
+        new TradeDetectorService(),
+        alerts as never,
+        config as never,
+      );
+
+      await expect(svc.syncUser('user-1')).resolves.toEqual({ created: 1, alerted: 1 });
+
+      expect(prisma.tradeEvent.upsert).toHaveBeenCalledTimes(1);
+      expect(prisma.tradeEvent.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({
+          groupId: 'group-consented-before-trade',
+          backfillStatus: 'NEW',
+          alertStatus: 'PENDING',
+        }),
+      }));
+      expect(prisma.tradeEvent.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ groupId: 'group-consented-after-trade' }),
+      }));
+      expect(prisma.tradeEvent.upsert).not.toHaveBeenCalledWith(expect.objectContaining({
+        create: expect.objectContaining({ groupId: 'group-consented-at-trade' }),
+      }));
+      expect(alerts.sendTradeAlert).toHaveBeenCalledWith('trade-group-consented-before-trade');
+      expect(alerts.sendTradeAlert).not.toHaveBeenCalledWith('trade-group-consented-at-trade');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('allows provisional position processing when recent orders fail but historical orders succeed', async () => {
+    const prisma = withSyncFence({
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'user-1',
+          brokerSyncEnabled: true,
+          snaptradeUserId: 'snap-user-1',
+          encryptedUserSecret: 'encrypted-secret',
+          memberships: [{
+            groupId: 'group-1',
+            privacyLevel: 'NORMAL',
+            alertsEnabled: true,
+            sharingEnabledAt: new Date(0),
+            group: { inferredAlertsEnabled: true },
+          }],
         }),
       },
       brokerConnection: {
@@ -334,7 +870,7 @@ describe('BrokerSyncService position-delta guards', () => {
         upsert: jest.fn(),
       },
       auditLog: { create: jest.fn() },
-    };
+    });
     const snap = {
       listConnections: jest.fn().mockResolvedValue([{ id: 'auth-1', disabled: false, type: 'read', brokerage: { display_name: 'Robinhood', slug: 'ROBINHOOD' } }]),
       listAccounts: jest.fn().mockResolvedValue([{ id: 'provider-account-1', raw_type: 'INDIVIDUAL' }]),
@@ -357,11 +893,23 @@ describe('BrokerSyncService position-delta guards', () => {
       'user-1',
       'db-account-1',
       'provider-account-1',
-      [{ groupId: 'group-1', group: { inferredAlertsEnabled: true } }],
+      [{
+        groupId: 'group-1',
+        privacyLevel: 'NORMAL',
+        alertsEnabled: true,
+        sharingEnabledAt: new Date(0),
+        group: { inferredAlertsEnabled: true },
+      }],
       [{ instrument: { id: 'sym-aapl', symbol: 'AAPL' }, units: 2, average_purchase_price: 101, currency: 'USD' }],
       false,
       { id: 'conn-1', brokerageName: 'Robinhood', brokerageSlug: 'ROBINHOOD' },
       true,
+      expect.any(Number),
+      prisma,
+      expect.objectContaining({
+        tradeAlertIds: expect.any(Set),
+        provisionalAlertIds: expect.any(Set),
+      }),
     );
   });
 
@@ -381,10 +929,10 @@ describe('BrokerSyncService position-delta guards', () => {
       null as never,
       config as never,
     ) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
+      fetchOrders(db: unknown, userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: historical });
+    await expect(svc.fetchOrders(prisma, 'user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: true, orders: historical });
   });
 
   it('preserves the historical watermark when the standard orders endpoint fails', async () => {
@@ -395,19 +943,19 @@ describe('BrokerSyncService position-delta guards', () => {
     };
     const config = { getOrThrow: jest.fn().mockReturnValue(3) };
     const svc = new BrokerSyncService(prisma as never, null as never, snap as never, null as never, null as never, config as never) as unknown as {
-      fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
+      fetchOrders(db: unknown, userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: unknown[] }>;
     };
 
-    await expect(svc.fetchOrders('user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: false, orders: [] });
+    await expect(svc.fetchOrders(prisma, 'user-1', 'secret', 'account-1')).resolves.toEqual({ complete: false, historicalComplete: false, orders: [] });
   });
 
   it('disconnects local connections that SnapTrade no longer returns', async () => {
     const prisma = { brokerConnection: { updateMany: jest.fn() } };
     const svc = new BrokerSyncService(prisma as never, null as never, null as never, null as never, null as never, null as never) as unknown as {
-      disconnectMissingConnections(userId: string, remoteAuthorizationIds: string[]): Promise<void>;
+      disconnectMissingConnections(db: unknown, userId: string, remoteAuthorizationIds: string[]): Promise<void>;
     };
 
-    await svc.disconnectMissingConnections('user-1', ['auth-live']);
+    await svc.disconnectMissingConnections(prisma, 'user-1', ['auth-live']);
 
     expect(prisma.brokerConnection.updateMany).toHaveBeenCalledWith({
       where: { userId: 'user-1', status: { not: 'DISCONNECTED' }, authorizationId: { notIn: ['auth-live'] } },

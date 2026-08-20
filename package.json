@@ -16,7 +16,8 @@
     "db:recovery-cleanup": "scripts/recovery-cleanup.sh",
     "lint": "corepack pnpm --filter @tradeping/api lint",
     "railway:recover": "scripts/railway-recover.sh",
-    "scripts:check": "bash -n scripts/*.sh"
+    "scripts:check": "bash -n scripts/*.sh",
+    "audit:prod": "node scripts/audit-production.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.1.0"

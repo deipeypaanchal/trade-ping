@@ -35,6 +35,7 @@ export const envSchema = z.object({
   ENCRYPTION_KEY_BASE64: z.string().refine(isExactly32ByteBase64, 'must decode to exactly 32 bytes'),
   INTERNAL_JOB_SECRET: z.string().min(32),
   RELEASE_SHA: z.string().min(7).optional(),
+  RAILWAY_DEPLOYMENT_ID: z.string().uuid().optional(),
   RECOVERY_SUPPRESS_BEFORE: z.string().datetime().optional(),
   TRADE_ORDER_LOOKBACK_DAYS: z.coerce.number().int().min(1).max(90).default(3),
   SYNC_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
@@ -48,6 +49,13 @@ export const envSchema = z.object({
     });
   }
   if (env.NODE_ENV === 'production') {
+    if (!env.TELEGRAM_BOT_USERNAME) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TELEGRAM_BOT_USERNAME'],
+        message: 'TELEGRAM_BOT_USERNAME is required in production',
+      });
+    }
     for (const key of ['APP_BASE_URL', 'SNAPTRADE_REDIRECT_URI'] as const) {
       if (!env[key].startsWith('https://')) {
         ctx.addIssue({

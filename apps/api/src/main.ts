@@ -22,13 +22,28 @@ async function bootstrap() {
   const port = Number(process.env.PORT ?? 3000);
   const server = await app.listen(port);
   let shuttingDown = false;
+  const httpDrainTimeoutMs = 30_000;
 
   const shutdown = async (signal: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.log(`${signal} received; closing HTTP server and shutting down`);
     try {
-      server.close();
+      await new Promise<void>((resolve, reject) => {
+        const forceClose = setTimeout(() => {
+          logger.warn(`HTTP drain exceeded ${httpDrainTimeoutMs}ms; closing remaining connections`);
+          server.closeAllConnections?.();
+        }, httpDrainTimeoutMs);
+        forceClose.unref?.();
+        server.close((err?: Error) => {
+          clearTimeout(forceClose);
+          if (err) reject(err);
+          else resolve();
+        });
+        // Keep active requests draining, but do not let idle keep-alive sockets
+        // delay a deploy shutdown.
+        server.closeIdleConnections?.();
+      });
       await app.close();
       logger.log('graceful shutdown complete');
       process.exit(0);

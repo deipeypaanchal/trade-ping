@@ -99,6 +99,7 @@ All variables are validated by Zod at boot (`apps/api/src/config/env.ts`). The s
 | `DATABASE_URL` | yes | `postgresql://user:pw@host:5432/db?schema=public` | Use a TLS connection in production (`sslmode=require`). |
 | `REDIS_URL` | yes | `rediss://default:pw@host:6379` | Prefer `rediss://`. Username/password parsed from URL. |
 | `TELEGRAM_BOT_TOKEN` | yes | `123:AA…` | From BotFather. |
+| `TELEGRAM_BOT_USERNAME` | yes in production | `tradeping_bot` | Username without `@`. Startup calls Telegram `getMe` and refuses webhook registration if the identity does not match. |
 | `TELEGRAM_WEBHOOK_SECRET` | yes | random 16–256 chars `[A-Za-z0-9_-]` | Sent by Telegram in `X-Telegram-Bot-Api-Secret-Token`; bot rejects mismatches. |
 | `INTERNAL_JOB_SECRET` | yes | ≥32 random chars | Bearer token for `POST /jobs/*` and `DELETE /account/delete`. |
 | `SNAPTRADE_CLIENT_ID` | yes | `PARTNERTEST` | From SnapTrade dashboard. |
@@ -107,8 +108,9 @@ All variables are validated by Zod at boot (`apps/api/src/config/env.ts`). The s
 | `SNAPTRADE_BROKER_SLUG` | no | `ROBINHOOD` | If set, Connection Portal opens directly into that brokerage. Leave blank to show the list. |
 | `SNAPTRADE_USE_MOCK` | no | `false` | Must be `false` in production (validated). |
 | `ENCRYPTION_KEY_BASE64` | yes | base64 32 bytes | Generated above. Encrypts SnapTrade `userSecret` in Postgres. |
-| `RELEASE_SHA` | no | `9c49eaa` | Deploy metadata returned by `/healthz` and `/livez`. The recovery script sets this from `git rev-parse` when possible. |
-| `RECOVERY_SUPPRESS_BEFORE` | no | `2026-07-06T05:44:00Z` | Emergency recovery guard. Executions before this timestamp are recorded but never posted, preventing downtime backfill spam. |
+| `RELEASE_SHA` | no | full 40-character Git SHA | Deploy metadata returned by `/healthz` and `/livez`. Recovery always sets and verifies the exact full `origin/main` SHA. |
+| `RAILWAY_DEPLOYMENT_ID` | no | `019c92ba-3e22-7c2a-a57c-89f03b330a51` | Railway deployment identity returned by `/healthz` and `/livez`; recovery verifies it against the one deployment created by the upload. |
+| `RECOVERY_SUPPRESS_BEFORE` | no at normal boot; required by recovery | `2026-08-11T14:30:00.000Z` | Emergency recovery guard. Recovery requires one explicit canonical UTC timestamp with milliseconds; reuse the exact value on every retry. Earlier executions are recorded but never posted. |
 | `TRADE_ORDER_LOOKBACK_DAYS` | no | `3` | How many days of orders to scan per sync (max 90). 3 is sane for near-real-time use. |
 | `SYNC_INTERVAL_MINUTES` | no | `5` | Cadence for the external cron hitting `POST /jobs/sync-all`. Lower = more SnapTrade calls. |
 | `BACKFILL_SUPPRESS_HOURS` | no | `24` | On a user's first sync, trades older than this are recorded as `BACKFILL` and **not** alerted. |
@@ -140,14 +142,13 @@ Then in Railway dashboard:
 1. **Service → Variables** → paste every variable from §3.
 2. **Service → Settings → Build** → leave the Dockerfile detection on (or set `Dockerfile`).
 3. **Service → Settings → Networking** → enable public networking, set the custom domain to `bot.example.com`, and let Railway provision the cert.
-4. **Service → Settings → Deploy** → leave the start command from `railway.json` (`node apps/api/dist/main.js`) and healthcheck `/healthz`.
-5. Trigger a deploy. Watch logs for `Nest application successfully started`.
-
-Run the initial migration once the service is up:
-
-```bash
-railway run corepack pnpm db:deploy
-```
+4. **Service → Settings → Deploy** → leave the exact start command from
+   `railway.json` (`node dist/main.js`) and healthcheck `/healthz`.
+5. Keep the API stopped, obtain the public Postgres URL from your secret
+   manager, and apply migrations from the exact checked-out release:
+   `DATABASE_URL='<public-postgres-url>' corepack pnpm db:deploy`.
+6. Trigger the API deploy only after migration succeeds. Watch logs for
+   `Nest application successfully started` and verify `/healthz`.
 
 Skip ahead to §8 (Telegram webhook) and §9 (SnapTrade dashboard) once the URL is live.
 
@@ -159,9 +160,12 @@ Skip ahead to §8 (Telegram webhook) and §9 (SnapTrade dashboard) once the URL 
 fly launch --no-deploy --dockerfile Dockerfile
 fly postgres create
 fly redis create
-fly secrets set $(cat .env.production | xargs)   # or set them one at a time
+# Import on stdin so secret values never appear in argv/process listings.
+fly secrets import < .env.production
+# Keep the API at zero instances during schema changes. From a trusted machine
+# connected through Fly's Postgres tunnel/proxy:
+DATABASE_URL='<fly-postgres-url>' corepack pnpm db:deploy
 fly deploy
-fly ssh console -C "node apps/api/node_modules/.bin/prisma migrate deploy --schema /app/prisma/schema.prisma"
 ```
 
 Point your DNS A/AAAA record at the Fly IP and set the custom domain inside Fly.
@@ -174,12 +178,18 @@ On any host with Docker and a reverse proxy that terminates TLS (Caddy, Nginx, T
 
 ```bash
 docker build -t tradeping:latest .
+docker build --target migration -t tradeping:migration .
+# Stop the old API before the migration; do not overlap this privacy release.
+docker stop tradeping 2>/dev/null || true
+docker run --rm --env-file ./prod.env tradeping:migration
+# The API container is stateless; remove the stopped instance before reusing
+# its name. Postgres/Redis data must live outside this container.
+docker rm tradeping 2>/dev/null || true
 docker run -d --name tradeping \
   --env-file ./prod.env \
   -p 127.0.0.1:3000:3000 \
   --restart=unless-stopped \
   tradeping:latest
-docker exec tradeping node apps/api/node_modules/.bin/prisma migrate deploy --schema /app/prisma/schema.prisma
 ```
 
 Reverse-proxy config requirements:
@@ -195,17 +205,21 @@ Pair with managed Postgres + Redis (do not run them as containers on the same ho
 
 ## 7. Database migration
 
-The repo ships with `prisma/migrations/20260520000000_init/` covering the entire schema. To apply against your production DB:
+The repo ships with the initial schema plus forward migrations. The explicit
+group-consent migration resets legacy memberships to `OFF`, adds the prospective
+`sharingEnabledAt` boundary and durable user sync gate, and skips unsafe unsent
+events while preserving sent history. To apply against your production DB:
 
 ```bash
 pnpm db:deploy           # runs prisma migrate deploy
 ```
 
-Inside Docker:
+With Docker, build and run the dedicated one-off migration target while the API
+is stopped, then start the slim runtime image:
 
 ```bash
-docker exec <container> node apps/api/node_modules/.bin/prisma migrate deploy \
-  --schema /app/prisma/schema.prisma
+docker build --target migration -t tradeping:migration .
+docker run --rm --env-file ./prod.env tradeping:migration
 ```
 
 When you add new migrations later:
@@ -219,11 +233,12 @@ pnpm db:deploy                                  # prod
 
 ## 8. Telegram webhook setup
 
-**This is automatic.** On startup the service registers the webhook **and** the
-slash-command menu itself (see `TelegramService.onModuleInit`), as long as
-`APP_BASE_URL` is a public `https://` URL and `TELEGRAM_BOT_TOKEN` is real.
-If those are still placeholders it logs a warning and skips registration, so
-just set them and redeploy. Failures are logged but never crash the service.
+**This is automatic.** On startup the service first calls Telegram `getMe` and
+checks the result against `TELEGRAM_BOT_USERNAME`, then registers the webhook
+and slash-command menu (see `TelegramService.onModuleInit`). Registration runs
+when `APP_BASE_URL` is a public `https://` URL and `TELEGRAM_BOT_TOKEN` is real.
+If those are still placeholders it logs a warning and skips registration.
+Identity or registration failures are logged but never crash the service.
 
 Verify after deploy:
 
@@ -231,7 +246,11 @@ Verify after deploy:
 curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 ```
 
-You should see your URL, `pending_update_count: 0`, and `last_error_message: null`.
+Require the exact expected URL, `max_connections: 1`, and both `message` and
+`my_chat_member` in `allowed_updates`. Investigate an error timestamped at or
+after the current deployment; Telegram may retain an older historical
+`last_error_message`. A nonzero `pending_update_count` should drain through
+normal processing—never clear it by dropping pending updates.
 
 If you change the domain or webhook secret, just restart the service — it
 re-registers on boot. To register manually (e.g. without redeploying):
@@ -242,10 +261,14 @@ curl -sS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d "{
         \"url\":\"https://bot.example.com/telegram/webhook\",
         \"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\",
-        \"allowed_updates\":[\"message\"],
-        \"drop_pending_updates\":true
+        \"allowed_updates\":[\"message\",\"my_chat_member\"],
+        \"max_connections\":1
       }"
 ```
+
+Do not add `drop_pending_updates` during a routine deploy or recovery. Queued
+updates can include safety-sensitive `/privacy off` or `/disconnect` requests
+and must survive service restarts.
 
 ---
 
@@ -273,8 +296,14 @@ Per-user onboarding flow:
 1. User DMs the bot `/start` (this is required so the bot can later send the brokerage connection link in DM).
 2. In the group: `/connect`. The bot DMs the user a SnapTrade Connection Portal link (5-minute TTL).
 3. User completes brokerage auth in the portal (read-only).
-4. SnapTrade fires `CONNECTION_ADDED` and `ACCOUNT_TRANSACTIONS_INITIAL_UPDATE` → we sync, suppress backfill, and arm future alerts.
-5. User can set privacy any time: `/privacy public|normal|private|off`.
+4. SnapTrade fires `CONNECTION_ADDED` and `ACCOUNT_TRANSACTIONS_INITIAL_UPDATE` → TradePing builds the read-only sync baseline, but group sharing remains `OFF`.
+5. In that group, the user explicitly runs `/privacy public`, `/privacy normal`, or `/privacy private`. This records a prospective consent boundary; executions before that instant never post there.
+
+Consent is per user and per group. A connection, reconnect, help/status command,
+or interaction in another group never enables sharing. `/privacy off` disables
+only the current group and cancels pending delivery there. If a member leaves a
+group, that member's sharing is disabled; if the bot is removed, all sharing and
+pending delivery for that group are disabled.
 
 ---
 
@@ -287,23 +316,38 @@ Run these in order. Don't ship to real users until all pass.
 curl https://bot.example.com/healthz
 # expect: {"ok":true,"service":"tradeping-api",...}
 
-# 2. Telegram webhook registered, no errors
+# 2. Telegram webhook uses the exact URL, max_connections=1, and
+#    allowed_updates=[message,my_chat_member]. No current-deploy error.
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 
 # 3. /start in DM with the bot. Expect the help text.
 # 4. /connect in group. Expect a DM with a SnapTrade portal URL.
 # 5. Complete the portal flow with a real (or test) brokerage account.
-# 6. Within ~1 minute you should see a USER_REGISTERED / CONNECTION_ADDED
+# 6. Confirm this group's membership is still OFF with no sharingEnabledAt.
+# 7. Within ~1 minute you should see a USER_REGISTERED / CONNECTION_ADDED
 #    audit entry:
 psql "$DATABASE_URL" -c "SELECT action, metadata, \"createdAt\" FROM \"AuditLog\" ORDER BY \"createdAt\" DESC LIMIT 20;"
 
-# 7. Place (or wait for) a real executed buy/sell. Confirm a group alert posts.
-# 8. /privacy private then place another trade → confirm the alert hides quantity/price/broker.
-# 9. /disconnect → confirm the broker connections are removed and group alerts stop.
-# 10. Force a manual full sync (proves internal job secret works):
+# 8. Sync an existing/pre-consent order. Confirm it does not post.
+# 9. Run /privacy normal in the group, then place a later executed trade.
+#    Confirm only the post-consent trade alerts.
+# 10. Run /status and /diagnostics in the group. Confirm details arrive by DM.
+# 11. Confirm /groupstatus rejects non-admins and gives admins aggregates only.
+# 12. In a second group, confirm sharing remains OFF until a separate /privacy choice.
+# 13. /privacy private, then place another trade. Confirm the alert is anonymous
+#     and hides quantity/price/value while retaining the broker label.
+# 14. /privacy off. Confirm only this group stops and pending alerts here skip.
+# 15. In DM, /disconnect must ask for confirmation. /disconnect confirm must
+#     disable the durable sync gate and all group sharing before remote revocation.
+# 16. Force a manual full sync (proves internal job secret works):
 curl -sS -X POST https://bot.example.com/jobs/sync-all \
   -H "authorization: Bearer $INTERNAL_JOB_SECRET"
 ```
+
+Also test Telegram leave updates: a member leave service message must disable
+only that member's sharing in the group. A canonical `my_chat_member` update
+with the bot status `left` or `kicked` must disable every membership and pending
+alert in that group.
 
 ---
 
@@ -350,22 +394,77 @@ Safe recovery order:
 
 2. If the quota is still blocked, wait for the free-plan quota reset or raise
    the workspace usage limit in Railway Billing/Usage.
-3. After quota is available, run the CLI recovery script from the repo root:
+3. Choose a single outage boundary, convert it to canonical UTC with
+   milliseconds, and record it in the incident log. Do not regenerate or move
+   this cutoff on retries. For example, midnight on July 31, 2026 in New York is
+   `2026-07-31T04:00:00.000Z`. Also choose one stable recovery run ID. Reuse the
+   same run ID, cutoff, and release commit for every retry.
+4. From a clean `main` whose HEAD exactly matches `origin/main`, run the CLI
+   recovery script. Supply an explicit production env file if the API service
+   no longer exists; otherwise the script can validate its preserved remote
+   variables.
 
    ```bash
    cp .env.example .env.production.local
    # Fill .env.production.local from your private secret manager.
-   scripts/railway-recover.sh .env.production.local
+   RECOVERY_RUN_ID=tradeping-20260731-outage \
+   RECOVERY_SUPPRESS_BEFORE=2026-07-31T04:00:00.000Z \
+   TRADEPING_RECOVERY_CONFIRM=restore-tradeping-20260731-outage-before-2026-07-31T04:00:00.000Z \
+     corepack pnpm railway:recover .env.production.local
    ```
+
+   To exercise every read-only check and stop before the first production
+   mutation, run the same stable contract with
+   `TRADEPING_RECOVERY_PREFLIGHT_ONLY=true`. Preflight-only mode does not relax
+   the run ID, cutoff, confirmation, Git, Railway identity, volume, tool, or
+   environment checks.
 
 The recovery script:
 
-- Refuses to recreate Postgres automatically if the Postgres service is missing.
-- Redeploys the existing Postgres service first.
-- Recreates Redis if it was deleted during cleanup.
-- Recreates the `api` service if it was deleted.
-- Pushes API variables from the local untracked env file or shell environment.
-- Deploys the API and polls `/healthz`.
+- Pins and verifies the exact GitHub origin, clean `main`, full
+  `origin/main` commit, Railway project, production environment, service IDs,
+  API domain ID/port, Postgres volume ID/mount/status, and non-zero volume size.
+- Requires the explicit stable `RECOVERY_RUN_ID`, canonical
+  `RECOVERY_SUPPRESS_BEFORE`, and matching confirmation value. Before any
+  production mutation it builds the release, runs the application's real
+  environment schema without printing values, confirms that the API is
+  offline/source-less, and checks the local PG18 tools, public database URL,
+  and backup free space.
+- Never creates a replacement Postgres service or empty volume. Because the
+  historical Railway deployment is removed, it pins the existing service to
+  the checked-in historical Postgres 18 image digest and deploys from that
+  immutable source. It polls the exact new deployment ID, verifies its digest
+  and volume mount, waits for `SELECT 1` and the TradePing schema, then verifies
+  the original `READY` volume again.
+- Creates the pre-migration custom-format backup only after PG18 is ready. The
+  backup is mode `600` in a mode `700` directory; `pg_restore --list` validates
+  its table of contents, a second `pg_restore` renders and decompresses the
+  entire archive, and a mandatory SHA-256 sidecar is verified before recovery
+  continues. Unique temporary/final names prevent overwrite collisions.
+- Marks only pre-cutoff `PENDING` or `SENDING` trade events as
+  `BACKFILL`/`SKIPPED` and removes expired webhook idempotency keys. Sent trade
+  history and rendered alert receipts are preserved. A transaction-scoped
+  lock and durable `AuditLog` contract make an identical retry idempotent and
+  reject reuse of a run ID with another cutoff or release SHA.
+- Pins Redis to its checked-in historical digest. If Redis or API must be
+  recreated, the script captures the new ID and stops before cleanup until the
+  operator explicitly confirms that replacement ID. A replacement API must
+  also attach the canonical hostname and have its new domain ID explicitly
+  confirmed. API creation is source-less; validated variables are stored
+  before any code upload.
+- Reasserts the API is offline and the exact canonical domain is active on the
+  exact source-less service immediately before cleanup. It then uploads the
+  clean local commit and polls the one deployment ID created by that upload.
+- Accepts success only when the canonical domain's `/healthz` reports
+  `service=tradeping-api`, the full 40-character release SHA, that exact
+  Railway deployment ID, and Postgres/Redis both up. A failed post-deploy
+  verification removes that exact newest deployment when it is safe to do so.
+- Calls Telegram `getWebhookInfo` without `drop_pending_updates`. The URL must
+  equal the pinned API origin plus `/telegram/webhook`; an error at or after
+  the verified deployment is fatal, while a timestamped older error is
+  reported as historical. Verification also requires `max_connections: 1`
+  and both `message` and `my_chat_member` in `allowed_updates`, preserving
+  serialized consent/removal ordering.
 
 Allowed cleanup before the quota reset:
 
@@ -375,7 +474,7 @@ railway volume detach --volume <redis-volume-id> --yes
 railway volume delete --volume <redis-volume-id> --yes
 railway service delete --service Redis --yes
 
-# Stateless service cleanup. Requires recreating API variables later.
+# Stateless service cleanup. Recovery then requires an explicit production env file.
 railway service delete --service api --yes
 ```
 
@@ -386,39 +485,44 @@ railway volume delete --volume <postgres-volume-id> --yes
 railway service delete --service Postgres --yes
 ```
 
-After recovery, immediately take a Postgres backup and run the smoke tests in
-§11 before inviting users to trade again:
+The script has already created and verified the required pre-migration backup.
+After it succeeds, run all smoke tests in §11 before inviting users to trade
+again. The explicit-consent migration intentionally resets legacy group
+memberships to `OFF`, so each member must make a fresh non-off `/privacy` choice
+in each group.
+
+If cleanup must be run independently, use the same incident run ID, cutoff,
+full release SHA, and exact confirmation value. Back up and verify Postgres
+first:
 
 ```bash
 corepack pnpm db:backup .env.production.local
-```
 
-When an outage must not replay executions from before a specific local date,
-convert that boundary to UTC and apply it at all three recovery layers. For
-example, midnight on July 31, 2026 in New York is `2026-07-31T04:00:00.000Z`:
-
-```bash
-# 1. Set RECOVERY_SUPPRESS_BEFORE on the API before it starts.
-# 2. Back up Postgres before any cleanup.
-corepack pnpm db:backup .env.production.local
-
-# 3. Preserve account links/dedupe records while neutralizing old alerts.
-TRADEPING_CLEANUP_CONFIRM=skip-and-clean-before-2026-07-31T04:00:00.000Z \
+RELEASE_SHA="$(git rev-parse HEAD)"
+TRADEPING_CLEANUP_CONFIRM=skip-and-clean-tradeping-20260731-outage-before-2026-07-31T04:00:00.000Z \
   corepack pnpm db:recovery-cleanup \
-  2026-07-31T04:00:00.000Z .env.production.local
+  2026-07-31T04:00:00.000Z .env.production.local \
+  tradeping-20260731-outage "$RELEASE_SHA"
 ```
 
 The cleanup intentionally keeps users, encrypted SnapTrade secrets, broker
 authorizations, accounts, Telegram groups, privacy settings, and sync
-baselines. Pre-cutoff trade records remain as `BACKFILL/SKIPPED` dedupe guards,
-while their rendered `Alert` rows are removed.
+baselines. It changes only pre-cutoff `PENDING`/`SENDING` events. Previously sent trade
+history and rendered `Alert` receipts remain intact.
 
 ### Rotating secrets
 
 - **Telegram bot token**: BotFather → `/revoke` → generate new → update `TELEGRAM_BOT_TOKEN` → re-run `setWebhook`.
 - **Telegram webhook secret**: generate new value → update env → re-run `setWebhook` with the new `secret_token`.
-- **SnapTrade consumer key**: rotate via SnapTrade dashboard → update env → redeploy. Any in-flight webhook with the old signature within 5 minutes will be rejected (acceptable).
-- **`ENCRYPTION_KEY_BASE64`**: do **not** rotate without a migration plan — every `encryptedUserSecret` row was encrypted with the old key. If you must rotate, write a one-time script that reads with the old key and re-writes with the new key inside a transaction. See [docs/CODE_REVIEW_DETAILED.md](CODE_REVIEW_DETAILED.md#key-rotation).
+- **SnapTrade consumer key**: rotate via SnapTrade dashboard → update env → redeploy. Any in-flight webhook still signed with the old key will be rejected; monitor provider retries across the 24-hour signed retry horizon.
+- **`ENCRYPTION_KEY_BASE64`**: do **not** replace this key in place. It encrypts
+  `encryptedUserSecret` and also keys Telegram-deletion suppression hashes and
+  account-name hashes. First deploy versioned/dual-key support. Re-encrypt each
+  secret with the new key, but keep the old HMAC key accepted for suppression
+  lookup until every old-key row has expired (up to 90 days), because the raw
+  Telegram ID no longer exists and those hashes cannot be recomputed. Preserve
+  or deliberately migrate account-hash continuity as well. Retire the old key
+  only after both encrypted rows and all old-key hash retention windows clear.
 - **`INTERNAL_JOB_SECRET`**: rotate freely; only your cron uses it.
 - **Database password**: rotate in the managed DB UI → update `DATABASE_URL`.
 
@@ -431,7 +535,50 @@ curl -sS -X DELETE https://bot.example.com/account/delete \
   -d '{"telegramUserId":"123456789"}'
 ```
 
-This calls SnapTrade `removeBrokerageAuthorization` on every active connection, then deletes the local `User` row. Cascades remove memberships, broker connections, accounts, trade events, alerts.
+Deletion is fail-closed and ordered:
+
+1. Disable the durable user sync gate, turn sharing `OFF` in every group,
+   cancel pending/sending alerts, mark local broker connections disconnected,
+   drain the sync/delivery fences, and purge that user's queued sync/alert jobs.
+2. Re-read the provider generation behind the fence. If a SnapTrade user exists,
+   create a durable `READY` `ProviderDeletion` tombstone first. In the same
+   local scrub, remove memberships, broker connections/accounts, sync state,
+   trades/alerts, and user-scoped audit logs; clear the Telegram ID, timezone,
+   SnapTrade ID, and encrypted secret. Only the opaque local user record and
+   provider deletion tombstone remain.
+3. Call `deleteSnapTradeUser`. HTTP success changes the tombstone to `PENDING`
+   and returns `remoteDeletionAccepted: true`; this is provider acceptance, not
+   confirmation. HTTP failure leaves it `READY` and returns
+   `retryRequired: true`. The background retry service runs at startup and
+   hourly, retrying every `READY` row plus `PENDING` rows older than 24 hours.
+4. A valid signed `USER_DELETED` webhook confirms deletion. If that webhook is
+   lost, an authoritative provider `404` while retrying deletion of the exact
+   generation-scoped identity also proves absence. Either terminal signal
+   removes the minimal local user record and provider tombstone. If no provider
+   identity existed, the endpoint can delete the local user immediately.
+
+A provider-backed request normally returns `deleted: false`, `pending: true`,
+and an opaque `deletionRequestId`. Store that value in the private support
+case: the Telegram identifier has already been scrubbed. An operator can retry
+a `READY` request explicitly with:
+
+```bash
+curl -sS -X DELETE https://bot.example.com/account/delete \
+  -H "authorization: Bearer $INTERNAL_JOB_SECRET" \
+  -H "content-type: application/json" \
+  -d '{"userId":"<deletionRequestId>"}'
+```
+
+Never report deletion as confirmed from `remoteDeletionAccepted: true`; wait
+for a signed webhook or the exact-identity authoritative `404` path and a later
+lookup returning `notFound: true`. A
+secret-only partial provider identity cannot be deleted remotely by ID: local
+content and the Telegram identifier are still scrubbed, but the response sets
+`manualReviewRequired: true` and retains a PII-minimized blocked record for
+operator resolution. Do not manually delete pending/blocked records or
+tombstones, because that destroys the retry/confirmation handle. An unknown or
+already-confirmed identifier is idempotent and returns
+`{ "ok": true, "deleted": false, "pending": false, "notFound": true }`.
 
 ### Inspecting state
 
@@ -481,11 +628,18 @@ git pull
 pnpm install --frozen-lockfile
 pnpm db:generate                 # types
 pnpm lint && pnpm test           # CI also enforces these
-pnpm db:deploy                   # if there are new migrations
-# push to your hosting provider (railway up / fly deploy / docker pull)
+# with the old API drained/stopped, apply migrations through the public DB URL
+DATABASE_URL='<public-postgres-url>' pnpm db:deploy
+# then push/start the new release (railway up / fly deploy / docker run)
 ```
 
-Rolling deploy is safe: the service is stateless, the queue persists in Redis, and Prisma migrations are forward-compatible.
+Routine code-only releases may use a rolling deploy, but this consent and
+deletion-lifecycle release must use a drained maintenance cutover. Stop the old
+API/worker before applying its migrations, then start only the new release and
+verify `/healthz`, the exact deployment ID, and Telegram webhook configuration.
+The pre-release binary does not understand the new privacy boundaries and must
+not overlap the migration or post-migration traffic. Run the post-cutover audit
+checks in the incident runbook before reopening traffic.
 
 ---
 
@@ -506,8 +660,17 @@ cp .env.example .env.production.local
 corepack pnpm db:backup .env.production.local
 ```
 
-The script writes a custom-format `pg_dump` under `backups/` and a SHA-256 file
-next to it. `backups/` is gitignored.
+The script requires PostgreSQL 18 `pg_dump`, `pg_restore`, and `psql`, confirms
+that the server is PG18 and has the expected TradePing schema, checks free
+space, and writes a mode-`600` custom-format dump under a mode-`700`
+`backups/` directory. It validates the table of contents with `pg_restore
+--list`, renders and decompresses the full archive to `/dev/null`, then writes
+and verifies a mandatory SHA-256 sidecar before publishing success. Unique
+names and no-clobber moves prevent an existing archive or checksum from being
+overwritten. `backups/` is excluded from both Git and Docker build contexts.
+The Railway recovery helper is stricter: it defaults to
+`../tradeping-backups` and refuses any backup directory that resolves inside
+the `railway up .` upload context.
 
 For Railway, prefer `DATABASE_PUBLIC_URL` from the Postgres service variables
 when running the backup locally. The private `postgres.railway.internal` URL only
