@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../config/prisma.service';
 import { CryptoService } from '../security/crypto.service';
 import { EncryptedSecretError } from '../security/errors';
@@ -13,8 +14,26 @@ import { contractMultiplier } from './asset-type';
 import { shouldSuppressAlert } from './suppress-policy';
 import { scopeKeyToGroup } from './order-key';
 import { supportsProvisionalPositionAlerts } from './broker-freshness';
-import { ALERT, JOB_DEFAULTS } from '../config/constants';
+import { ALERT, JOB_DEFAULTS, SYNC } from '../config/constants';
 import { isExcludedBotSymbol } from './excluded-symbols';
+import {
+  acquireGroupDeliveryLock,
+  acquireUserSafetyLocks,
+  SYNC_FENCE_TRANSACTION,
+} from '../security/user-safety-lock';
+
+export class SyncDeadlineExceededError extends Error {
+  constructor(phase: string) {
+    super(`broker sync deadline exceeded during ${phase}`);
+    this.name = 'SyncDeadlineExceededError';
+  }
+}
+
+type SyncDatabase = Prisma.TransactionClient | PrismaService;
+type SyncPostCommitWork = {
+  tradeAlertIds: Set<string>;
+  provisionalAlertIds: Set<string>;
+};
 
 @Injectable()
 export class BrokerSyncService {
@@ -30,16 +49,64 @@ export class BrokerSyncService {
   ) {}
 
   async syncUser(userId: string, opts: { suppressBackfill?: boolean } = {}): Promise<{ created: number; alerted: number }> {
-    const user = await this.prisma.user.findUniqueOrThrow({
+    // Measure from before the transaction opens. Advisory-lock contention is
+    // therefore part of the budget instead of silently consuming the entire
+    // 15-minute transaction lifetime before provider work begins.
+    const deadlineAt = Date.now() + SYNC.MAX_RUN_MS;
+    const postCommit: SyncPostCommitWork = {
+      tradeAlertIds: new Set<string>(),
+      provisionalAlertIds: new Set<string>(),
+    };
+    const result = await this.prisma.$transaction(async (tx) => {
+      await acquireUserSafetyLocks(tx, userId, ['sync']);
+      this.assertSyncDeadline(deadlineAt, 'sync lock acquisition');
+      return this.syncUserWithFence(tx, userId, opts, deadlineAt, postCommit);
+    }, SYNC_FENCE_TRANSACTION);
+
+    // External delivery and Redis queue work each have their own safety bounds
+    // and must start only after the database transaction has committed. This
+    // keeps the lock-owning transaction as the sole writer during sync while
+    // avoiding uncommitted TradeEvents that a separate AlertService transaction
+    // cannot see.
+    for (const tradeEventId of postCommit.provisionalAlertIds) {
+      await this.scheduleProvisionalAlert(tradeEventId);
+    }
+    let alerted = 0;
+    for (const tradeEventId of postCommit.tradeAlertIds) {
+      try {
+        if (await this.alerts.sendTradeAlert(tradeEventId)) alerted += 1;
+      } catch (err) {
+        this.logger.warn(`alert send threw for trade ${tradeEventId}: ${(err as Error).message}`);
+      }
+    }
+    if (result.created || alerted) this.logger.log(`sync completed for ${userId}: created=${result.created} alerted=${alerted}`);
+    return { created: result.created, alerted };
+  }
+
+  private async syncUserWithFence(
+    db: Prisma.TransactionClient,
+    userId: string,
+    opts: { suppressBackfill?: boolean } = {},
+    deadlineAt = Date.now() + SYNC.MAX_RUN_MS,
+    postCommit: SyncPostCommitWork = { tradeAlertIds: new Set(), provisionalAlertIds: new Set() },
+  ): Promise<{ created: number; alerted: number }> {
+    this.assertSyncDeadline(deadlineAt, 'user lookup');
+    const user = await db.user.findUniqueOrThrow({
       where: { id: userId },
       include: {
         memberships: {
-          where: { group: { telegramChatId: { startsWith: '-' } } },
+          where: {
+            alertsEnabled: true,
+            privacyLevel: { not: 'OFF' },
+            sharingEnabledAt: { not: null },
+            group: { telegramChatId: { startsWith: '-' } },
+          },
           include: { group: { select: { inferredAlertsEnabled: true } } },
         },
       },
     });
-    if (!user.snaptradeUserId || !user.encryptedUserSecret) return { created: 0, alerted: 0 };
+    this.assertSyncDeadline(deadlineAt, 'user lookup');
+    if (!user.brokerSyncEnabled || !user.snaptradeUserId || !user.encryptedUserSecret) return { created: 0, alerted: 0 };
 
     // Decrypt up front. If the encryption key rotated or the payload is corrupted,
     // mark the user's connections as disconnected so they're prompted to /connect
@@ -49,12 +116,13 @@ export class BrokerSyncService {
       userSecret = this.crypto.decrypt(user.encryptedUserSecret);
     } catch (err) {
       if (err instanceof EncryptedSecretError) {
+        this.assertSyncDeadline(deadlineAt, 'decrypt failure cleanup');
         this.logger.error(`decrypt failed for user ${userId}: ${err.message}; marking connections DISCONNECTED`);
-        await this.prisma.brokerConnection.updateMany({
+        await db.brokerConnection.updateMany({
           where: { userId, status: { not: 'DISCONNECTED' } },
           data: { status: 'DISCONNECTED', disabledReason: 'Encryption key mismatch — please /connect again', disconnectedAt: new Date() },
         });
-        await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'decrypt_failed' } } });
+        await db.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'decrypt_failed' } } });
         return { created: 0, alerted: 0 };
       }
       throw err;
@@ -62,35 +130,52 @@ export class BrokerSyncService {
 
     let created = 0, alerted = 0;
     let connections;
+    this.assertSyncDeadline(deadlineAt, 'list connections');
     try {
       connections = await this.snap.listConnections(user.snaptradeUserId, userSecret);
     } catch (err) {
+      this.assertSyncDeadline(deadlineAt, 'list connections');
       this.logger.warn(`syncUser(${userId}) listConnections failed: ${(err as Error).message}; skipping this run`);
-      await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'list_connections_failed', message: (err as Error).message } } });
+      await db.auditLog.create({ data: { userId, action: 'broker_sync_failed', metadata: { reason: 'list_connections_failed', message: (err as Error).message } } });
       return { created, alerted };
     }
-    await this.disconnectMissingConnections(userId, connections.map((conn) => conn.id));
+    this.assertSyncDeadline(deadlineAt, 'list connections');
+    if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
+    await this.disconnectMissingConnections(db, userId, connections.map((conn) => conn.id));
+    this.assertSyncDeadline(deadlineAt, 'connection reconciliation');
 
     for (const conn of connections) {
+      this.assertSyncDeadline(deadlineAt, 'connection loop');
+      if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
       try {
-        const dbConn = await this.prisma.brokerConnection.upsert({
+        const dbConn = await db.brokerConnection.upsert({
           where: { authorizationId: conn.id },
           update: { brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
           create: { userId, authorizationId: conn.id, brokerageName: conn.brokerage?.display_name ?? conn.brokerage?.name, brokerageSlug: conn.brokerage?.slug, connectionType: conn.type ?? 'read', status: conn.disabled ? 'DISABLED' : 'ACTIVE' },
         });
+        this.assertSyncDeadline(deadlineAt, 'connection upsert');
         if (conn.disabled) continue;
+        this.assertSyncDeadline(deadlineAt, 'list accounts');
         const accounts = await this.snap.listAccounts(user.snaptradeUserId, userSecret, conn.id);
-        await this.disconnectMissingAccounts(dbConn.id, accounts.map((account) => account.id));
+        this.assertSyncDeadline(deadlineAt, 'list accounts');
+        if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
+        await this.disconnectMissingAccounts(db, dbConn.id, accounts.map((account) => account.id));
+        this.assertSyncDeadline(deadlineAt, 'account reconciliation');
         for (const acct of accounts) {
+          this.assertSyncDeadline(deadlineAt, 'account loop');
+          if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
           const acctNameHash = acct.name ? this.crypto.hash(acct.name) : undefined;
           const accountType = this.accountTypeFrom(acct);
-          const dbAcct = await this.prisma.brokerAccount.upsert({
+          const dbAcct = await db.brokerAccount.upsert({
             where: { connectionId_providerAccountId: { connectionId: dbConn.id, providerAccountId: acct.id } },
             update: { accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
             create: { connectionId: dbConn.id, providerAccountId: acct.id, accountNameHash: acctNameHash, accountType, status: 'ACTIVE' },
           });
-          const previousSnapshot = await this.positionSnapshot(userId, dbAcct.id);
-          const orderFetch = await this.fetchOrders(user.snaptradeUserId, userSecret, acct.id);
+          this.assertSyncDeadline(deadlineAt, 'account upsert');
+          const previousSnapshot = await this.positionSnapshot(db, userId, dbAcct.id);
+          this.assertSyncDeadline(deadlineAt, 'position baseline lookup');
+          const orderFetch = await this.fetchOrders(db, user.snaptradeUserId, userSecret, acct.id, deadlineAt);
+          if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
           const orders = orderFetch.orders;
           const seenOrderHashes = new Set<string>();
           // First sync for an account establishes a baseline: every order returned is
@@ -98,11 +183,12 @@ export class BrokerSyncService {
           // After the baseline, suppression is delegated to the pure shouldSuppressAlert
           // policy which also folds in the last successful sync time so an outage
           // longer than the static window doesn't re-alert old fills.
-          const lastSuccessfulSyncAt = await this.lastSuccessfulSyncAt(userId, dbAcct.id);
+          const lastSuccessfulSyncAt = await this.lastSuccessfulSyncAt(db, userId, dbAcct.id);
           const isFirstSync = lastSuccessfulSyncAt === null;
           const backfillSuppressHours = this.config.getOrThrow<number>('BACKFILL_SUPPRESS_HOURS');
           const suppressBefore = this.recoverySuppressBefore();
           for (const order of orders) {
+            this.assertSyncDeadline(deadlineAt, 'order loop');
             const norm = this.detector.normalizeOrder(userId, acct.id, order);
             if (!norm) continue;
             if (seenOrderHashes.has(norm.dedupeHash)) continue;
@@ -117,8 +203,12 @@ export class BrokerSyncService {
             });
             const suppress = decision.suppress;
             for (const member of user.memberships) {
+              this.assertSyncDeadline(deadlineAt, 'group event loop');
+              // Consent is prospective. A newly enabled group must not receive
+              // recent orders that executed before the user's explicit choice.
+              if (!member.sharingEnabledAt || norm.tradeTime <= member.sharingEnabledAt) continue;
               const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
-              const trade = await this.prisma.tradeEvent.upsert({
+              const trade = await db.tradeEvent.upsert({
                 where: { dedupeHash: dedupe },
                 update: {},
                 create: {
@@ -151,48 +241,65 @@ export class BrokerSyncService {
                   alertStatus: suppress ? 'SKIPPED' : 'PENDING',
                 },
               });
+              this.assertSyncDeadline(deadlineAt, 'trade event upsert');
               if (trade.createdAt.getTime() > Date.now() - 10_000) created += 1;
               if (!suppress && trade.alertStatus === 'PENDING') {
-                try {
-                  if (await this.alerts.sendTradeAlert(trade.id)) alerted += 1;
-                } catch (e) {
-                  this.logger.warn(`alert send threw for trade ${trade.id}: ${(e as Error).message}`);
-                }
+                postCommit.tradeAlertIds.add(trade.id);
               }
             }
           }
           try {
+            this.assertSyncDeadline(deadlineAt, 'position fetch');
+            if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
             const positions = await this.snap.listAccountPositions(user.snaptradeUserId, userSecret, acct.id);
-            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true, dbConn, orderFetch.historicalComplete);
+            this.assertSyncDeadline(deadlineAt, 'position fetch');
+            if (!await this.syncStillEnabled(db, userId, deadlineAt)) return { created, alerted };
+            const positionCounts = await this.syncPositionDeltas(userId, dbAcct.id, acct.id, user.memberships, positions, opts.suppressBackfill === true, dbConn, orderFetch.historicalComplete, deadlineAt, db, postCommit);
             created += positionCounts.created;
             alerted += positionCounts.alerted;
           } catch (err) {
+            if (err instanceof SyncDeadlineExceededError) throw err;
             this.logger.warn(`syncUser(${userId}) account ${acct.id} positions failed: ${(err as Error).message}`);
-            await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_positions_failed', metadata: { accountId: acct.id, message: (err as Error).message } } });
+            await db.auditLog.create({ data: { userId, action: 'broker_sync_positions_failed', metadata: { accountId: acct.id, message: (err as Error).message } } });
           }
           // recentOrders is a realtime add-on that is not enabled for every
           // SnapTrade customer. The standard historical endpoint is sufficient
           // to establish the normal-order baseline and to allow clearly labeled
           // provisional holdings alerts when recentOrders is temporarily flaky.
-          if (orderFetch.historicalComplete) await this.markOrderSynced(userId, dbAcct.id);
+          this.assertSyncDeadline(deadlineAt, 'order watermark');
+          if (orderFetch.historicalComplete) await this.markOrderSynced(db, userId, dbAcct.id);
+          this.assertSyncDeadline(deadlineAt, 'order watermark');
         }
       } catch (err) {
+        if (err instanceof SyncDeadlineExceededError) throw err;
         // Per-connection isolation: a single failing brokerage must not abort the
         // whole user's sync. Other connections (and a future retry of this one)
         // can still make progress.
         this.logger.warn(`syncUser(${userId}) connection ${conn.id} failed: ${(err as Error).message}`);
-        await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_connection_failed', metadata: { authorizationId: conn.id, message: (err as Error).message } } });
+        await db.auditLog.create({ data: { userId, action: 'broker_sync_connection_failed', metadata: { authorizationId: conn.id, message: (err as Error).message } } });
       }
     }
-    await this.prisma.auditLog.create({ data: { userId, action: 'broker_sync_completed', metadata: { created, alerted } } });
-    if (created || alerted) this.logger.log(`sync completed for ${userId}: created=${created} alerted=${alerted}`);
+    this.assertSyncDeadline(deadlineAt, 'completion audit');
+    await db.auditLog.create({ data: { userId, action: 'broker_sync_completed', metadata: { created, alertsQueued: postCommit.tradeAlertIds.size } } });
     return { created, alerted };
+  }
+
+  private assertSyncDeadline(deadlineAt: number, phase: string): void {
+    if (Date.now() >= deadlineAt) throw new SyncDeadlineExceededError(phase);
+  }
+
+  private async syncStillEnabled(db: SyncDatabase, userId: string, deadlineAt: number): Promise<boolean> {
+    this.assertSyncDeadline(deadlineAt, 'sync-enabled check');
+    const enabled = (await db.user.findUnique({ where: { id: userId }, select: { brokerSyncEnabled: true } }))?.brokerSyncEnabled === true;
+    this.assertSyncDeadline(deadlineAt, 'sync-enabled check');
+    return enabled;
   }
 
   /** IDs of every user that has completed SnapTrade registration and can be synced. */
   async listSyncableUserIds(): Promise<string[]> {
     const users = await this.prisma.user.findMany({
       where: {
+        brokerSyncEnabled: true,
         snaptradeUserId: { not: null },
         encryptedUserSecret: { not: null },
         brokerConnections: { some: { status: { not: 'DISCONNECTED' } } },
@@ -209,20 +316,29 @@ export class BrokerSyncService {
     }
   }
 
-  private async fetchOrders(userId: string, userSecret: string, accountId: string): Promise<{ complete: boolean; historicalComplete: boolean; orders: SnapTradeOrder[] }> {
+  private async fetchOrders(
+    db: SyncDatabase,
+    userId: string,
+    userSecret: string,
+    accountId: string,
+    deadlineAt = Date.now() + SYNC.MAX_RUN_MS,
+  ): Promise<{ complete: boolean; historicalComplete: boolean; orders: SnapTradeOrder[] }> {
+    this.assertSyncDeadline(deadlineAt, 'order fetch');
     const [recent, historical] = await Promise.allSettled([
       this.snap.listRecentAccountOrders(userId, userSecret, accountId),
       this.snap.listAccountOrders(userId, userSecret, accountId, this.config.getOrThrow<number>('TRADE_ORDER_LOOKBACK_DAYS')),
     ]);
+    this.assertSyncDeadline(deadlineAt, 'order fetch');
     const failures = [
       ...(recent.status === 'rejected' ? [{ source: 'recent', message: (recent.reason as Error).message }] : []),
       ...(historical.status === 'rejected' ? [{ source: 'historical', message: (historical.reason as Error).message }] : []),
     ];
     if (failures.length) {
       this.logger.warn(`sync account ${accountId} order fetch incomplete: ${failures.map((failure) => `${failure.source}: ${failure.message}`).join('; ')}; processing available orders and preserving last successful order watermark`);
-      await this.prisma.auditLog.create({
+      await db.auditLog.create({
         data: { userId, action: 'broker_sync_orders_failed', metadata: { accountId, failures } },
       });
+      this.assertSyncDeadline(deadlineAt, 'order failure audit');
     }
     return {
       complete: failures.length === 0,
@@ -234,22 +350,22 @@ export class BrokerSyncService {
     };
   }
 
-  private async disconnectMissingConnections(userId: string, remoteAuthorizationIds: string[]) {
-    await this.prisma.brokerConnection.updateMany({
+  private async disconnectMissingConnections(db: SyncDatabase, userId: string, remoteAuthorizationIds: string[]) {
+    await db.brokerConnection.updateMany({
       where: { userId, status: { not: 'DISCONNECTED' }, authorizationId: { notIn: remoteAuthorizationIds } },
       data: { status: 'DISCONNECTED', disabledReason: 'No longer returned by SnapTrade', disconnectedAt: new Date() },
     });
   }
 
-  private async disconnectMissingAccounts(connectionId: string, remoteAccountIds: string[]) {
-    await this.prisma.brokerAccount.updateMany({
+  private async disconnectMissingAccounts(db: SyncDatabase, connectionId: string, remoteAccountIds: string[]) {
+    await db.brokerAccount.updateMany({
       where: { connectionId, status: { not: 'DISCONNECTED' }, providerAccountId: { notIn: remoteAccountIds } },
       data: { status: 'DISCONNECTED' },
     });
   }
 
-  private async lastSuccessfulSyncAt(userId: string, accountId: string): Promise<Date | null> {
-    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
+  private async lastSuccessfulSyncAt(db: SyncDatabase, userId: string, accountId: string): Promise<Date | null> {
+    const state = await db.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } } });
     if (!state?.value || typeof state.value !== 'object' || Array.isArray(state.value)) return null;
     const at = (state.value as { at?: unknown }).at;
     if (typeof at !== 'string') return null;
@@ -266,8 +382,8 @@ export class BrokerSyncService {
     return Number.isFinite(date.getTime()) ? date : null;
   }
 
-  private async positionSnapshot(userId: string, accountId: string): Promise<PositionSnapshotEntry[]> {
-    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } } });
+  private async positionSnapshot(db: SyncDatabase, userId: string, accountId: string): Promise<PositionSnapshotEntry[]> {
+    const state = await db.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } } });
     return this.readPositionSnapshot(state?.value);
   }
 
@@ -294,47 +410,91 @@ export class BrokerSyncService {
     userId: string,
     dbAccountId: string,
     providerAccountId: string,
-    memberships: { groupId: string; group?: { inferredAlertsEnabled: boolean } }[],
+    memberships: { groupId: string; sharingEnabledAt: Date | null; group?: { inferredAlertsEnabled: boolean } }[],
     positions: SnapTradePosition[],
     suppressBackfill: boolean,
     broker: { brokerageName?: string | null; brokerageSlug?: string | null } = {},
     orderHistoryComplete = false,
+    deadlineAt = Date.now() + SYNC.MAX_RUN_MS,
+    db: SyncDatabase = this.prisma,
+    postCommit?: SyncPostCommitWork,
   ): Promise<{ created: number; alerted: number }> {
+    this.assertSyncDeadline(deadlineAt, 'position delta setup');
     const current = positions
       .map((position) => this.detector.normalizePosition(position))
       .filter((position): position is PositionSnapshotEntry => position !== null);
     const currentByKey = this.positionMap(current);
-    const state = await this.prisma.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId: dbAccountId, key: 'position_snapshot' } } });
+    const state = await db.syncState.findUnique({ where: { userId_accountId_key: { userId, accountId: dbAccountId, key: 'position_snapshot' } } });
+    this.assertSyncDeadline(deadlineAt, 'position snapshot lookup');
     const previous = this.readPositionSnapshot(state?.value);
     const previousByKey = this.positionMap(previous);
     const positionChangeHealth = this.positionChangeHealth(previousByKey, currentByKey);
-    const hasFreshBaseline = this.positionSnapshotIsFresh(state?.value);
 
     let created = 0;
     const alerted = 0;
     const startedAt = Date.now();
     if (state && !suppressBackfill) {
       if (positionChangeHealth === 'PARTIAL_DROP') {
-        await this.auditSuspiciousPositionDelta(userId, dbAccountId, previous, current, 'partial_drop');
+        await this.auditSuspiciousPositionDelta(db, userId, dbAccountId, previous, current, 'partial_drop');
+        this.assertSyncDeadline(deadlineAt, 'position anomaly audit');
         return { created, alerted };
       }
       if (positionChangeHealth === 'REHYDRATION') {
-        await this.auditSuspiciousPositionDelta(userId, dbAccountId, previous, current, 'rehydration');
-        await this.writePositionSnapshot(userId, dbAccountId, current);
+        await this.auditSuspiciousPositionDelta(db, userId, dbAccountId, previous, current, 'rehydration');
+        this.assertSyncDeadline(deadlineAt, 'position rehydration audit');
+        await this.writePositionSnapshot(db, userId, dbAccountId, current);
+        this.assertSyncDeadline(deadlineAt, 'position rehydration snapshot');
         return { created, alerted };
       }
       const keys = new Set([...previousByKey.keys(), ...currentByKey.keys()]);
       for (const key of keys) {
+        this.assertSyncDeadline(deadlineAt, 'position delta loop');
         const norm = this.detector.normalizePositionDelta(userId, providerAccountId, previousByKey.get(key), currentByKey.get(key));
         if (!norm) continue;
-        for (const member of memberships) {
-          const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
-          const provisional = member.group?.inferredAlertsEnabled === true
+        for (const member of [...memberships].sort((a, b) => a.groupId.localeCompare(b.groupId))) {
+          this.assertSyncDeadline(deadlineAt, 'position consent fence');
+          const tx = db as Prisma.TransactionClient;
+          await acquireGroupDeliveryLock(tx, member.groupId);
+          this.assertSyncDeadline(deadlineAt, 'position group delivery lock');
+          await acquireUserSafetyLocks(tx, userId, ['delivery']);
+          this.assertSyncDeadline(deadlineAt, 'position user delivery lock');
+
+          // Memberships and the first baseline read both predate this consent
+          // fence. Refresh both now: OFF -> enabled must establish a baseline
+          // strictly after its new epoch, and a baseline that aged out while we
+          // waited can never become a provisional alert.
+          const currentMember = await db.groupMember.findUnique({
+            where: { userId_groupId: { userId, groupId: member.groupId } },
+            select: { alertsEnabled: true, privacyLevel: true, sharingEnabledAt: true },
+          });
+          this.assertSyncDeadline(deadlineAt, 'position consent refresh');
+          const fencedBaseline = await db.syncState.findUnique({
+            where: { userId_accountId_key: { userId, accountId: dbAccountId, key: 'position_snapshot' } },
+            select: { value: true },
+          });
+          this.assertSyncDeadline(deadlineAt, 'position consent refresh');
+          const fencedBaselineAt = this.positionSnapshotAt(fencedBaseline?.value);
+          if (
+            !currentMember?.alertsEnabled
+            || currentMember.privacyLevel === 'OFF'
+            || !currentMember.sharingEnabledAt
+            || !fencedBaselineAt
+            || fencedBaselineAt <= currentMember.sharingEnabledAt
+          ) continue;
+
+          const currentGroup = await db.group.findUnique({
+            where: { id: member.groupId },
+            select: { inferredAlertsEnabled: true },
+          });
+          this.assertSyncDeadline(deadlineAt, 'position group refresh');
+          const provisional = currentGroup?.inferredAlertsEnabled === true
             && supportsProvisionalPositionAlerts(broker)
             && orderHistoryComplete
-            && hasFreshBaseline
-            && !(await this.hasMatchingConfirmedExecution(dbAccountId, member.groupId, norm));
-          const trade = await this.prisma.tradeEvent.upsert({
+            && this.positionSnapshotIsFresh(fencedBaseline?.value)
+            && !(await this.hasMatchingConfirmedExecution(dbAccountId, member.groupId, norm, db));
+          this.assertSyncDeadline(deadlineAt, 'position execution match');
+          const dedupe = scopeKeyToGroup(norm.dedupeHash, member.groupId);
+          const trade = await db.tradeEvent.upsert({
             where: { dedupeHash: dedupe },
             update: {},
             create: {
@@ -361,15 +521,21 @@ export class BrokerSyncService {
               alertStatus: provisional ? 'PENDING' : 'SKIPPED',
             },
           });
+          this.assertSyncDeadline(deadlineAt, 'position consent fence');
           if (trade.createdAt.getTime() >= startedAt) created += 1;
           if (provisional && trade.alertStatus === 'PENDING') {
-            await this.scheduleProvisionalAlert(trade.id);
+            this.assertSyncDeadline(deadlineAt, 'provisional alert scheduling');
+            if (postCommit) postCommit.provisionalAlertIds.add(trade.id);
+            else await this.scheduleProvisionalAlert(trade.id);
+            this.assertSyncDeadline(deadlineAt, 'provisional alert scheduling');
           }
         }
       }
     }
 
-    await this.writePositionSnapshot(userId, dbAccountId, current);
+    this.assertSyncDeadline(deadlineAt, 'position snapshot write');
+    await this.writePositionSnapshot(db, userId, dbAccountId, current);
+    this.assertSyncDeadline(deadlineAt, 'position snapshot write');
     return { created, alerted };
   }
 
@@ -393,9 +559,14 @@ export class BrokerSyncService {
     }
   }
 
-  private async hasMatchingConfirmedExecution(accountId: string, groupId: string, trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; tradeTime: Date }): Promise<boolean> {
+  private async hasMatchingConfirmedExecution(
+    accountId: string,
+    groupId: string,
+    trade: { symbol: string; side: 'BUY' | 'SELL'; quantity?: number; tradeTime: Date },
+    db: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<boolean> {
     const windowMs = ALERT.PROVISIONAL_EXECUTION_MATCH_WINDOW_MS;
-    return (await this.prisma.tradeEvent.count({
+    return (await db.tradeEvent.count({
       where: {
         accountId,
         groupId,
@@ -413,9 +584,14 @@ export class BrokerSyncService {
   }
 
   private positionSnapshotIsFresh(value: unknown): boolean {
-    if (!value || typeof value !== 'object' || Array.isArray(value) || !('at' in value) || typeof value.at !== 'string') return false;
+    const at = this.positionSnapshotAt(value);
+    return !!at && Date.now() - at.getTime() <= ALERT.PROVISIONAL_BASELINE_MAX_AGE_MS;
+  }
+
+  private positionSnapshotAt(value: unknown): Date | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !('at' in value) || typeof value.at !== 'string') return null;
     const at = new Date(value.at);
-    return Number.isFinite(at.getTime()) && Date.now() - at.getTime() <= ALERT.PROVISIONAL_BASELINE_MAX_AGE_MS;
+    return Number.isFinite(at.getTime()) ? at : null;
   }
 
   private positionChangeHealth(previousByKey: Map<string, PositionSnapshotEntry>, currentByKey: Map<string, PositionSnapshotEntry>): 'OK' | 'PARTIAL_DROP' | 'REHYDRATION' {
@@ -430,8 +606,15 @@ export class BrokerSyncService {
     return 'OK';
   }
 
-  private async auditSuspiciousPositionDelta(userId: string, accountId: string, previous: PositionSnapshotEntry[], current: PositionSnapshotEntry[], reason: string) {
-    await this.prisma.auditLog.create({
+  private async auditSuspiciousPositionDelta(
+    db: SyncDatabase,
+    userId: string,
+    accountId: string,
+    previous: PositionSnapshotEntry[],
+    current: PositionSnapshotEntry[],
+    reason: string,
+  ) {
+    await db.auditLog.create({
       data: {
         userId,
         action: 'broker_sync_position_delta_suppressed',
@@ -471,16 +654,16 @@ export class BrokerSyncService {
     });
   }
 
-  private async writePositionSnapshot(userId: string, accountId: string, positions: PositionSnapshotEntry[]) {
-    await this.prisma.syncState.upsert({
+  private async writePositionSnapshot(db: SyncDatabase, userId: string, accountId: string, positions: PositionSnapshotEntry[]) {
+    await db.syncState.upsert({
       where: { userId_accountId_key: { userId, accountId, key: 'position_snapshot' } },
       update: { value: { at: new Date().toISOString(), positions } },
       create: { userId, accountId, key: 'position_snapshot', value: { at: new Date().toISOString(), positions } },
     });
   }
 
-  private async markOrderSynced(userId: string, accountId: string) {
-    await this.prisma.syncState.upsert({
+  private async markOrderSynced(db: SyncDatabase, userId: string, accountId: string) {
+    await db.syncState.upsert({
       where: { userId_accountId_key: { userId, accountId, key: 'last_successful_order_sync' } },
       update: { value: { at: new Date().toISOString() } },
       create: { userId, accountId, key: 'last_successful_order_sync', value: { at: new Date().toISOString() } },

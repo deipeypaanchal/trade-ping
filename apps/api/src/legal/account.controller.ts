@@ -23,9 +23,34 @@ export class AccountController {
     const user = hasId
       ? await this.prisma.user.findUnique({ where: { id: body.userId! } })
       : await this.prisma.user.findUnique({ where: { telegramUserId: body.telegramUserId! } });
-    if (!user) return { ok: true, deleted: false };
-    await this.broker.disconnectAll(user.id);
-    await this.prisma.user.delete({ where: { id: user.id } });
-    return { ok: true, deleted: true };
+    if (!user) return { ok: true, deleted: false, pending: false, notFound: true };
+    // SnapTrade accepts user deletion asynchronously. The service scrubs local
+    // content immediately but retains an opaque local record plus provider
+    // tombstone until signed USER_DELETED confirms it or an exact-generation
+    // deletion retry receives the provider's authoritative 404 absence signal.
+    const deletion = await this.broker.deleteRemoteUser(user.id);
+    if (deletion.state === 'COMPLETE') {
+      await this.prisma.user.deleteMany({ where: { id: user.id } });
+      return {
+        ok: true,
+        deleted: true,
+        pending: false,
+        providerDeletionRequired: false,
+        providerCredentialState: deletion.providerCredentialState,
+        purgedJobs: deletion.purgedJobs,
+      };
+    }
+    return {
+      ok: true,
+      deleted: false,
+      pending: true,
+      deletionRequestId: user.id,
+      remoteDeletionAccepted: deletion.state === 'PENDING',
+      retryRequired: deletion.state === 'RETRY_REQUIRED',
+      manualReviewRequired: deletion.state === 'MANUAL_REVIEW_REQUIRED',
+      providerDeletionRequired: true,
+      providerCredentialState: deletion.providerCredentialState,
+      purgedJobs: deletion.purgedJobs,
+    };
   }
 }

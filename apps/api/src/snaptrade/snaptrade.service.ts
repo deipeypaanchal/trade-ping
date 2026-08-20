@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Snaptrade } from 'snaptrade-typescript-sdk';
+import { SYNC } from '../config/constants';
 import { SnapTradeAccount, SnapTradeAllPositions, SnapTradeConnection, SnapTradeOrder, SnapTradePortal, SnapTradePosition, SnapTradeRecentOrders, SnapTradeUser } from './snaptrade.types';
 
 @Injectable()
@@ -23,6 +24,10 @@ export class SnaptradeService {
       this.client = new Snaptrade({
         clientId: this.config.getOrThrow<string>('SNAPTRADE_CLIENT_ID'),
         consumerKey: this.config.getOrThrow<string>('SNAPTRADE_CONSUMER_KEY'),
+        // The generated SDK uses axios. Without a finite timeout a provider
+        // socket can outlive the transaction that owns our advisory lock and
+        // allow the awaiting sync callback to resume after its safety fence.
+        baseOptions: { timeout: SYNC.SNAPTRADE_REQUEST_TIMEOUT_MS },
       });
       return this.client;
     } catch (err) {
@@ -53,12 +58,12 @@ export class SnaptradeService {
     await this.sdk().authentication.deleteSnapTradeUser({ userId });
   }
 
-  async connectionPortal(userId: string, userSecret: string, groupId: string, reconnect?: string): Promise<SnapTradePortal> {
+  async connectionPortal(userId: string, userSecret: string, _groupId: string, reconnect?: string): Promise<SnapTradePortal> {
     if (this.mock) {
       return { redirectURI: `${this.config.getOrThrow<string>('APP_BASE_URL')}/snaptrade/callback?mock=true`, sessionId: 'mock-session' };
     }
     const broker = this.config.get<string>('SNAPTRADE_BROKER_SLUG') || undefined;
-    const customRedirect = `${this.config.getOrThrow<string>('SNAPTRADE_REDIRECT_URI')}?groupId=${encodeURIComponent(groupId)}`;
+    const customRedirect = this.config.getOrThrow<string>('SNAPTRADE_REDIRECT_URI');
     const res = await this.sdk().authentication.loginSnapTradeUser({
       userId,
       userSecret,

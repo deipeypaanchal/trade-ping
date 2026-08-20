@@ -1,5 +1,11 @@
 # Code Review
 
+> Historical snapshot: this review describes the initial implementation and is
+> not current deployment or security guidance. Use `README.md`,
+> `docs/DEPLOYMENT.md`, `docs/PRIVACY.md`, and `docs/LAUNCH_CHECKLIST.md` for the
+> current product contract. Signed SnapTrade webhook retries now use a 24-hour
+> acceptance horizon plus a reclaimable processing lease.
+
 ## Review scope
 
 Reviewed architecture, data model, Telegram webhook handling, SnapTrade integration layer, trade detection, alert privacy, encryption, webhook verification, worker flow, and production checklist.

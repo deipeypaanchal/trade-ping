@@ -2,15 +2,18 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { PrismaService } from '../config/prisma.service';
 
 /**
- * Background sweeper that deletes expired IdempotencyKey rows. Without this the
- * table grows unbounded and disk usage tracks total webhook volume forever,
- * even though every row's purpose ends at `expiresAt` (10 min by default).
+ * Background sweeper that deletes expired webhook idempotency rows and old,
+ * HMAC-scoped Telegram ordering cursors. Without it replay state grows forever.
  *
  * Runs every IDEMPOTENCY_SWEEP_INTERVAL_MS, opportunistically; a missed sweep
- * does no harm \u2014 the unique-key on `key` is what actually enforces
- * idempotency, the table only acts as a TTL cache.
+ * does no harm \u2014 completed rows and finite processing leases enforce
+ * idempotency; expiry only bounds how long replay state is retained.
  */
 const IDEMPOTENCY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+// Telegram may reset update_id after a week without updates. Expire ordering
+// state with a margin so the first post-idle safety command is never compared
+// against an unrelated ID from the prior sequence.
+const TELEGRAM_CURSOR_RETENTION_MS = 6 * 24 * 60 * 60_000;
 
 @Injectable()
 export class IdempotencySweeperService implements OnModuleInit, OnModuleDestroy {
@@ -31,8 +34,16 @@ export class IdempotencySweeperService implements OnModuleInit, OnModuleDestroy 
 
   async sweep(): Promise<number> {
     try {
-      const { count } = await this.prisma.idempotencyKey.deleteMany({ where: { expiresAt: { lt: new Date() } } });
-      if (count > 0) this.logger.log(`swept ${count} expired idempotency key(s)`);
+      const now = new Date();
+      const [{ count: idempotencyCount }, { count: cursorCount }, { count: suppressionCount }] = await Promise.all([
+        this.prisma.idempotencyKey.deleteMany({ where: { expiresAt: { lt: now } } }),
+        this.prisma.telegramUpdateCursor.deleteMany({
+          where: { updatedAt: { lt: new Date(now.getTime() - TELEGRAM_CURSOR_RETENTION_MS) } },
+        }),
+        this.prisma.telegramIdentitySuppression.deleteMany({ where: { expiresAt: { lt: now } } }),
+      ]);
+      const count = idempotencyCount + cursorCount + suppressionCount;
+      if (count > 0) this.logger.log(`swept ${count} expired replay-state row(s)`);
       return count;
     } catch (err) {
       this.logger.warn(`idempotency sweep failed: ${(err as Error).message}`);

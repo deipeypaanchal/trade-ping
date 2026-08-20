@@ -37,7 +37,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
   function makeService(opts: {
     sendImpl?: jest.Mock;
-    member?: { alertsEnabled: boolean; privacyLevel: string };
+    member?: { alertsEnabled: boolean; privacyLevel: string; sharingEnabledAt?: Date | null } | null;
+    inferredAlertsEnabled?: boolean;
     recoverySuppressBefore?: string;
   } = {}) {
     const sentTexts: string[] = [];
@@ -47,13 +48,24 @@ describe('AlertService.render (via sendTradeAlert)', () => {
         findFirst: jest.fn().mockResolvedValue(null),
         count: jest.fn().mockResolvedValue(0),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-        update: jest.fn(),
       },
       groupMember: {
-        findUnique: jest.fn().mockResolvedValue(opts.member ?? { alertsEnabled: true, privacyLevel: 'PUBLIC' }),
+        findUnique: jest.fn().mockResolvedValue(
+          Object.prototype.hasOwnProperty.call(opts, 'member')
+            ? opts.member === null
+              ? null
+              : { sharingEnabledAt: new Date(0), ...opts.member }
+            : { alertsEnabled: true, privacyLevel: 'PUBLIC', sharingEnabledAt: new Date(0) },
+        ),
+      },
+      group: {
+        findUnique: jest.fn().mockResolvedValue({
+          inferredAlertsEnabled: opts.inferredAlertsEnabled ?? false,
+        }),
       },
       alert: { create: jest.fn(), update: jest.fn() },
       auditLog: { create: jest.fn() },
+      $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
     } as unknown as PrismaService;
     (prisma as unknown as { $transaction: jest.Mock }).$transaction = jest.fn(async (fn: (tx: PrismaService) => Promise<unknown>) => fn(prisma));
     const telegram = {
@@ -78,7 +90,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
 
     expect(sendImpl).not.toHaveBeenCalled();
-    expect(prisma.tradeEvent.update).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.updateMany).not.toHaveBeenCalled();
   });
 
   it('does not send when another worker already claimed the event', async () => {
@@ -98,6 +110,47 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     expect(prisma.alert.create).not.toHaveBeenCalled();
   });
 
+  it('acquires the delivery fence before rechecking consent and sending to Telegram', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn().mockResolvedValue({ message_id: 1 });
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
+
+    const lock = prisma.$queryRaw as jest.Mock;
+    expect(lock).toHaveBeenCalledTimes(2);
+    expect(lock.mock.invocationCallOrder[1]).toBeLessThan(
+      (prisma.groupMember.findUnique as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((prisma.groupMember.findUnique as jest.Mock).mock.invocationCallOrder[0])
+      .toBeLessThan(sendImpl.mock.invocationCallOrder[0]);
+    expect(sendImpl).toHaveBeenCalledWith(
+      '-100',
+      expect.stringContaining('Broker-confirmed alert'),
+      { deadlineAt: expect.any(Number) },
+    );
+  });
+
+  it('does not recreate an alert receipt when the conditional sent write no longer owns a deliverable row', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn().mockResolvedValue({ message_id: 99 });
+    const { svc, prisma } = makeService({ sendImpl });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+    (prisma.tradeEvent.updateMany as jest.Mock)
+      .mockResolvedValueOnce({ count: 1 }) // claim PENDING -> SENDING
+      .mockResolvedValueOnce({ count: 0 }); // /privacy off already changed SENDING -> SKIPPED
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).toHaveBeenCalledTimes(1);
+    expect(prisma.tradeEvent.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'trade-1', alertStatus: { in: ['SENDING', 'SKIPPED'] } },
+      data: { alertStatus: 'SENT', alertAttempts: { increment: 1 }, lastAlertAttemptAt: expect.any(Date) },
+    });
+    expect(prisma.alert.create).not.toHaveBeenCalled();
+  });
+
   it('returns transient failures to pending so they can retry without duplicate concurrent sends', async () => {
     const event = makeEvent();
     const sendImpl = jest.fn().mockRejectedValue(new Error('network down'));
@@ -106,42 +159,150 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
 
-    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({
-      where: { id: 'trade-1' },
+    expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
       data: expect.objectContaining({ alertStatus: 'PENDING', alertAttempts: { increment: 1 } }),
     });
   });
 
   it('blocks a pre-cutoff execution at the final Telegram delivery boundary', async () => {
-    const event = makeEvent({ tradeTime: new Date('2026-07-31T03:59:59.999Z') });
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-07-31T04:05:00.000Z'));
+    try {
+      const event = makeEvent({ tradeTime: new Date('2026-07-31T03:59:59.999Z') });
+      const sendImpl = jest.fn();
+      const { svc, prisma } = makeService({
+        sendImpl,
+        recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
+      });
+      (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+      await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+      expect(sendImpl).not.toHaveBeenCalled();
+      expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+        where: { id: 'trade-1', alertStatus: 'SENDING' },
+        data: { alertStatus: 'SKIPPED' },
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('allows an execution exactly at the recovery cutoff', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-07-31T04:05:00.000Z'));
+    try {
+      const event = makeEvent({ tradeTime: new Date('2026-07-31T04:00:00.000Z') });
+      const sendImpl = jest.fn().mockResolvedValue({ message_id: 1 });
+      const { svc, prisma } = makeService({
+        sendImpl,
+        recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
+      });
+      (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+      await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
+
+      expect(sendImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not send when the user never consented to share in the destination group', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({ sendImpl, member: null });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
+      data: { alertStatus: 'SKIPPED' },
+    });
+  });
+
+  it('does not send when group alerts are disabled despite a non-OFF privacy level', async () => {
+    const event = makeEvent();
     const sendImpl = jest.fn();
     const { svc, prisma } = makeService({
       sendImpl,
-      recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
+      member: { alertsEnabled: false, privacyLevel: 'NORMAL', sharingEnabledAt: null },
     });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
 
     expect(sendImpl).not.toHaveBeenCalled();
-    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({
-      where: { id: 'trade-1' },
+  });
+
+  it('does not send for an active-looking membership without an explicit consent epoch', async () => {
+    const event = makeEvent();
+    const sendImpl = jest.fn();
+    const { svc, prisma } = makeService({
+      sendImpl,
+      member: { alertsEnabled: true, privacyLevel: 'NORMAL', sharingEnabledAt: null },
+    });
+    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+    expect(sendImpl).not.toHaveBeenCalled();
+    expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
       data: { alertStatus: 'SKIPPED' },
     });
   });
 
-  it('allows an execution exactly at the recovery cutoff', async () => {
-    const event = makeEvent({ tradeTime: new Date('2026-07-31T04:00:00.000Z') });
-    const sendImpl = jest.fn().mockResolvedValue({ message_id: 1 });
-    const { svc, prisma } = makeService({
-      sendImpl,
-      recoverySuppressBefore: '2026-07-31T04:00:00.000Z',
-    });
-    (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+  it('does not send an execution that predates consent for that group', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-11T15:05:00.000Z'));
+    try {
+      const event = makeEvent({ tradeTime: new Date('2026-08-11T14:59:59.999Z') });
+      const sendImpl = jest.fn();
+      const { svc, prisma } = makeService({
+        sendImpl,
+        member: {
+          alertsEnabled: true,
+          privacyLevel: 'NORMAL',
+          sharingEnabledAt: new Date('2026-08-11T15:00:00.000Z'),
+        },
+      });
+      (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
-    await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
+      await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
 
-    expect(sendImpl).toHaveBeenCalledTimes(1);
+      expect(sendImpl).not.toHaveBeenCalled();
+      expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+        where: { id: 'trade-1', alertStatus: 'SENDING' },
+        data: { alertStatus: 'SKIPPED' },
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('blocks an execution exactly at the per-group consent boundary', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-11T15:05:00.000Z'));
+    try {
+      const consentAt = new Date('2026-08-11T15:00:00.000Z');
+      const event = makeEvent({ tradeTime: consentAt });
+      const sendImpl = jest.fn().mockResolvedValue({ message_id: 1 });
+      const { svc, prisma } = makeService({
+        sendImpl,
+        member: { alertsEnabled: true, privacyLevel: 'NORMAL', sharingEnabledAt: consentAt },
+      });
+      (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
+
+      await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
+
+      expect(sendImpl).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('escapes HTML special characters including quotes', async () => {
@@ -180,7 +341,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
   it('adds estimated return in public privacy mode', async () => {
     const event = makeEvent({ side: 'SELL', profitLoss: new Decimal('25.50'), profitLossPct: new Decimal('12.75') });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const { svc, prisma, sentTexts } = makeService({
+      member: { alertsEnabled: true, privacyLevel: 'PUBLIC' },
+      inferredAlertsEnabled: true,
+    });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     await svc.sendTradeAlert('trade-1');
@@ -200,7 +364,12 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(true);
 
-    expect(telegram.editMessageText).toHaveBeenCalledWith('-100', 42, expect.stringContaining('<b>🟢 @trader bought AAPL</b>'));
+    expect(telegram.editMessageText).toHaveBeenCalledWith(
+      '-100',
+      42,
+      expect.stringContaining('<b>🟢 @trader bought AAPL</b>'),
+      { deadlineAt: expect.any(Number) },
+    );
     expect(sendImpl).not.toHaveBeenCalled();
     expect(prisma.alert.update).toHaveBeenCalledWith({ where: { id: 'provisional-alert-1' }, data: { renderedText: expect.stringContaining('Broker-confirmed alert') } });
     expect(prisma.alert.create).toHaveBeenCalledWith({
@@ -215,18 +384,33 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     });
   });
 
-  it('does not send inferred position-delta alerts', async () => {
+  it('rechecks the group flag behind the fence before sending an inferred position delta', async () => {
     const recent = new Date(Date.now() - 5 * 60_000);
-    const event = makeEvent({ rawType: 'position_delta', rawStatus: 'INFERRED', priceSource: 'POSITION_COST_BASIS', tradeTime: recent, createdAt: recent });
+    const event = makeEvent({
+      rawType: 'position_delta',
+      rawStatus: 'INFERRED',
+      priceSource: 'POSITION_COST_BASIS',
+      tradeTime: recent,
+      createdAt: recent,
+      // This is the stale pre-fence snapshot. The current group mock remains
+      // OFF, simulating an admin command that committed while the worker waited.
+      group: { telegramChatId: '-100', inferredAlertsEnabled: true },
+    });
     const sendImpl = jest.fn();
-    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const { svc, prisma } = makeService({
+      sendImpl,
+      member: { alertsEnabled: true, privacyLevel: 'PUBLIC' },
+    });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     const ok = await svc.sendTradeAlert('trade-1');
 
     expect(ok).toBe(false);
     expect(sendImpl).not.toHaveBeenCalled();
-    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
+    expect((prisma.tradeEvent.updateMany as jest.Mock)).toHaveBeenCalledWith({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
+      data: { alertStatus: 'SKIPPED' },
+    });
   });
 
   it('sends an opted-in Robinhood position delta as a clearly labeled provisional alert', async () => {
@@ -239,7 +423,10 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       createdAt: recent,
       group: { telegramChatId: '-100', inferredAlertsEnabled: true },
     });
-    const { svc, prisma, sentTexts } = makeService({ member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const { svc, prisma, sentTexts } = makeService({
+      member: { alertsEnabled: true, privacyLevel: 'PUBLIC' },
+      inferredAlertsEnabled: true,
+    });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     const ok = await svc.sendTradeAlert('trade-1');
@@ -265,14 +452,21 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       group: { telegramChatId: '-100', inferredAlertsEnabled: true },
     });
     const sendImpl = jest.fn();
-    const { svc, prisma } = makeService({ sendImpl, member: { alertsEnabled: true, privacyLevel: 'PUBLIC' } });
+    const { svc, prisma } = makeService({
+      sendImpl,
+      member: { alertsEnabled: true, privacyLevel: 'PUBLIC' },
+      inferredAlertsEnabled: true,
+    });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
     (prisma.tradeEvent.count as jest.Mock).mockResolvedValue(1);
 
     await expect(svc.sendTradeAlert('trade-1')).resolves.toBe(false);
 
     expect(sendImpl).not.toHaveBeenCalled();
-    expect(prisma.tradeEvent.update).toHaveBeenCalledWith({ where: { id: 'trade-1' }, data: { alertStatus: 'SKIPPED' } });
+    expect(prisma.tradeEvent.updateMany).toHaveBeenCalledWith({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
+      data: { alertStatus: 'SKIPPED' },
+    });
   });
 
   it('does not send inferred Fidelity alerts even if the group flag is enabled', async () => {
@@ -287,7 +481,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
       account: { accountType: 'INDIVIDUAL', connection: { brokerageName: 'Fidelity' } },
     });
     const sendImpl = jest.fn();
-    const { svc, prisma } = makeService({ sendImpl });
+    const { svc, prisma } = makeService({ sendImpl, inferredAlertsEnabled: true });
     (prisma.tradeEvent.findUniqueOrThrow as jest.Mock).mockResolvedValue(event);
 
     expect(await svc.sendTradeAlert('trade-1')).toBe(false);
@@ -450,8 +644,8 @@ describe('AlertService.render (via sendTradeAlert)', () => {
 
     const ok = await svc.sendTradeAlert('trade-1');
     expect(ok).toBe(false);
-    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'trade-1' },
+    expect((prisma.tradeEvent.updateMany as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'trade-1', alertStatus: 'SENDING' },
       data: expect.objectContaining({ alertStatus: 'SKIPPED' }),
     }));
   });
@@ -465,7 +659,7 @@ describe('AlertService.render (via sendTradeAlert)', () => {
     const ok = await svc.sendTradeAlert('trade-1');
     expect(ok).toBe(false);
     expect(sendImpl).not.toHaveBeenCalled();
-    expect((prisma.tradeEvent.update as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
+    expect((prisma.tradeEvent.updateMany as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ alertStatus: 'SKIPPED' }),
     }));
   });

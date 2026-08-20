@@ -17,25 +17,45 @@ export const LIMITS = {
   TELEGRAM_MAX_RETRIES: 2,
   /** Default safety margin added to Telegram retry_after. */
   TELEGRAM_RETRY_AFTER_PADDING_S: 0.2,
+  /** Bound each Telegram HTTP request independently of any caller deadline. */
+  TELEGRAM_REQUEST_TIMEOUT_MS: 15_000,
+  /** Keep an outbound delivery inside the five-minute database safety fence. */
+  TELEGRAM_MAX_RETRY_AFTER_S: 60,
 } as const;
 
 export const WEBHOOK = {
-  /** Maximum age of a SnapTrade webhook (replay protection). */
-  REPLAY_WINDOW_MS: 5 * 60_000,
+  /** Accept delayed signed provider retries, including deletion confirmations. */
+  REPLAY_WINDOW_MS: 24 * 60 * 60_000,
   /** Permit small provider/server clock skew while rejecting future-dated replays. */
   FUTURE_TOLERANCE_MS: 60_000,
-  /** How long to remember a SnapTrade event signature for replay-rejection. */
-  IDEMPOTENCY_TTL_MS: 10 * 60_000,
+  /** Outlive the acceptance window so a canonical signed event runs once. */
+  IDEMPOTENCY_TTL_MS: 7 * 24 * 60 * 60_000,
+  /** A crashed handler becomes reclaimable after this bounded lease. */
+  PROCESSING_LEASE_MS: 3 * 60_000,
+  /** Webhooks should not occupy a database connection indefinitely waiting for a fence. */
+  FENCE_MAX_WAIT_MS: 30_000,
+  /** Bounds lock wait, one provider request, queueing, and transactional writes. */
+  FENCE_TIMEOUT_MS: 2 * 60_000,
 } as const;
 
 export const SYNC = {
-  /** BullMQ worker concurrency for the trade-sync queue. */
-  CONCURRENCY: 2,
+  /** One active user sync leaves database-pool headroom for the lifecycle and
+   * delivery fences plus health checks in the combined beta process. */
+  CONCURRENCY: 1,
   /** Rate limiter window for trade-sync jobs. */
   RATE_LIMIT_MAX: 30,
   RATE_LIMIT_DURATION_MS: 60_000,
   /** Fan-out dedupe window for sync-user jobs. */
   FANOUT_DEDUPE_WINDOW_MS: 60_000,
+  /** Axios timeout applied to every SnapTrade SDK request. */
+  SNAPTRADE_REQUEST_TIMEOUT_MS: 30_000,
+  /**
+   * Cooperative sync budget, measured before the advisory-lock transaction is
+   * opened. The remaining seven minutes of the transaction timeout cover one
+   * bounded delivery-fence wait, one in-flight provider timeout, and database
+   * cleanup without allowing work to escape the sync lock.
+   */
+  MAX_RUN_MS: 8 * 60_000,
 } as const;
 
 export const JOB_DEFAULTS = {
@@ -51,6 +71,12 @@ export const TIME = {
 } as const;
 
 export const ALERT = {
+  /**
+   * Absolute budget for lock acquisition, Telegram queueing/retries, and send.
+   * This leaves one minute for final database writes before the five-minute
+   * delivery-fence transaction expires.
+   */
+  DELIVERY_MAX_RUN_MS: 4 * 60_000,
   /** Stop retrying a PENDING trade alert after this many attempts. Prevents
    *  Telegram-outage trades from cycling forever and replaying old fills. */
   MAX_ATTEMPTS: 8,

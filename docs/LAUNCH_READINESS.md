@@ -21,7 +21,7 @@ connected brokers, broker freshness, last sync check, and latest detected trade.
 - Deployment: Dockerfile image, non-root runtime user, `tini` for signal handling.
 - Health: Railway health check uses `/healthz`, which verifies Postgres with `SELECT 1` and Redis with `PING`.
 - Liveness: `/livez` is available for a cheap process-only check.
-- Jobs: BullMQ queue in Redis, worker concurrency 2, job limiter 30 jobs/minute.
+- Jobs: BullMQ queue in Redis, worker concurrency 1, job limiter 30 jobs/minute; the single beta worker leaves database-pool headroom for lifecycle and delivery fences.
 - Sync: automatic `sync-all` every `SYNC_INTERVAL_MINUTES`, currently intended to be 1 minute for beta.
 - Data source: SnapTrade recent orders and historical orders. Position deltas are recorded for diagnostics only and are not sent as group alerts.
 - Broker freshness: best-effort near-real-time where the broker supports it. Fidelity and IBKR can be delayed up to 24h, so the bot must not promise realtime alerts for every broker.

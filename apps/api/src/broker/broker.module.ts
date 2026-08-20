@@ -8,6 +8,7 @@ import { AlertsModule } from '../alerts/alerts.module';
 import { BrokerOnboardingService } from './broker-onboarding.service';
 import { BrokerSyncService } from './broker-sync.service';
 import { TradeDetectorService } from './trade-detector.service';
+import { ProviderDeletionRetryService } from './provider-deletion-retry.service';
 
-@Module({ imports: [ConfigModule, SnaptradeModule, forwardRef(() => AlertsModule), BullModule.registerQueue({ name: 'trade-sync' })], providers: [PrismaService, CryptoService, BrokerOnboardingService, BrokerSyncService, TradeDetectorService], exports: [BrokerOnboardingService, BrokerSyncService, TradeDetectorService] })
+@Module({ imports: [ConfigModule, SnaptradeModule, forwardRef(() => AlertsModule), BullModule.registerQueue({ name: 'trade-sync' })], providers: [PrismaService, CryptoService, BrokerOnboardingService, BrokerSyncService, TradeDetectorService, ProviderDeletionRetryService], exports: [BrokerOnboardingService, BrokerSyncService, TradeDetectorService] })
 export class BrokerModule {}

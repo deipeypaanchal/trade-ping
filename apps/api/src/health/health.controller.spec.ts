@@ -6,12 +6,19 @@ describe('HealthController', () => {
     const prisma = { $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]) };
     const redis = { ping: jest.fn().mockResolvedValue('PONG') };
     const queue = { client: Promise.resolve(redis) };
-    const config = { get: jest.fn().mockReturnValue('abc1234') };
+    const config = {
+      get: jest.fn((key: string) => key === 'RELEASE_SHA'
+        ? 'abc1234'
+        : key === 'RAILWAY_DEPLOYMENT_ID'
+          ? '019c92ba-3e22-7c2a-a57c-89f03b330a51'
+          : undefined),
+    };
 
     await expect(new HealthController(prisma as never, queue as never, config as never).health()).resolves.toEqual(expect.objectContaining({
       ok: true,
       service: 'tradeping-api',
       release: 'abc1234',
+      deploymentId: '019c92ba-3e22-7c2a-a57c-89f03b330a51',
       startedAt: expect.any(String),
       uptimeSeconds: expect.any(Number),
       checks: { database: 'up', redis: 'up' },
@@ -69,6 +76,7 @@ describe('HealthController', () => {
       ok: true,
       service: 'tradeping-api',
       release: null,
+      deploymentId: null,
       startedAt: expect.any(String),
       uptimeSeconds: expect.any(Number),
     }));

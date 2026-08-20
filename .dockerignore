@@ -5,6 +5,9 @@ apps/*/node_modules
 apps/*/dist
 coverage
 .turbo
+backups/
+*.dump
+*.dump.sha256
 .DS_Store
 .env
 .env.*
